@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package app.forgeflow.agent
 
 import androidx.compose.animation.AnimatedVisibility
