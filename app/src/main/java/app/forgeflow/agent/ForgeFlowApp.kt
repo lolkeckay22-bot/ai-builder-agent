@@ -47,7 +47,7 @@ fun ForgeFlowApp(vm: AgentViewModel = viewModel()) {
                 Workspace(ui, vm) { scope.launch { vm.openDrawer(true) } }
             }
         }
-        if (ui.settingsOpen) ApiSettings(ui.apiKey, ui.error, onDismiss = { vm.openSettings(false) }, onSave = vm::saveApiKey)
+        if (ui.settingsOpen) BackendSettings(ui.backendUrl, ui.deviceToken, ui.error, onDismiss = { vm.openSettings(false) }, onSave = vm::saveBackend)
     }
 }
 
@@ -104,6 +104,7 @@ private fun ConversationBody(chat: Conversation, running: Boolean, modifier: Mod
         if (chat.messages.isEmpty()) item { EmptyState(chat.mode) }
         items(chat.messages) { MessageBubble(it) }
         if (chat.mode == WorkspaceMode.WORK && chat.todos.isNotEmpty()) item { TodoCard(chat.todos) }
+        chat.artifact?.let { artifact -> item { ArtifactCard(artifact, onDownload = { vm.downloadArtifact(artifact, false) }, onShare = { vm.downloadArtifact(artifact, true) }) } }
         if (running) item { TypingIndicator() }
     }
 }
@@ -167,6 +168,26 @@ private fun TypingIndicator() {
 }
 
 @Composable
+private fun ArtifactCard(artifact: WorkArtifact, onDownload: () -> Unit, onShare: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = Accent.copy(alpha = .12f)), shape = RoundedCornerShape(18.dp)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Description, null, tint = Accent)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(artifact.name, fontWeight = FontWeight.SemiBold)
+                    Text("Готовый artifact · ${"%.1f".format(artifact.size / 1048576.0)} MB", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onDownload) { Icon(Icons.Default.Download, null); Spacer(Modifier.width(6.dp)); Text("Download") }
+                OutlinedButton(onClick = onShare) { Icon(Icons.Default.Share, null); Spacer(Modifier.width(6.dp)); Text("Share") }
+            }
+        }
+    }
+}
+
+@Composable
 private fun Composer(ui: AppUiState, vm: AgentViewModel) {
     val running = ui.activeId in ui.runningIds
     Surface(color = MaterialTheme.colorScheme.background, tonalElevation = 2.dp) {
@@ -223,20 +244,22 @@ private fun HistoryDrawer(ui: AppUiState, vm: AgentViewModel) {
 }
 
 @Composable
-private fun ApiSettings(initial: String, error: String?, onDismiss: () -> Unit, onSave: (String) -> Unit) {
-    var key by remember(initial) { mutableStateOf(initial) }
+private fun BackendSettings(initialUrl: String, initialToken: String, error: String?, onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
+    var url by remember(initialUrl) { mutableStateOf(initialUrl) }
+    var token by remember(initialToken) { mutableStateOf(initialToken) }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Default.Key, null) },
-        title = { Text("NVIDIA API") },
+        title = { Text("WorkAI Backend") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Ключ хранится только в памяти приложения и не попадает в GitHub или APK.", style = MaterialTheme.typography.bodySmall)
-                OutlinedTextField(key, { key = it }, label = { Text("API key") }, singleLine = true)
+                Text("NVIDIA и GitHub ключи хранятся на сервере. В приложение вводится только персональный токен устройства.", style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(url, { url = it }, label = { Text("Backend URL") }, singleLine = true)
+                OutlinedTextField(token, { token = it }, label = { Text("WORKAI_DEVICE_TOKEN") }, singleLine = true)
                 AnimatedVisibility(error != null) { Text(error.orEmpty(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(key) }, enabled = key.isNotBlank()) { Text("Сохранить") } },
+        confirmButton = { TextButton(onClick = { onSave(url, token) }, enabled = url.isNotBlank() && token.length >= 20) { Text("Сохранить") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } }
     )
 }
