@@ -3,6 +3,7 @@ package app.forgeflow.agent
 import android.app.Application
 import android.content.ContentValues
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -36,16 +38,23 @@ enum class TodoState { WAITING, RUNNING, DONE, FAILED }
 data class ChatMessage(val role: MessageRole, val text: String, val createdAt: Long = System.currentTimeMillis())
 data class WorkTodo(val title: String, val state: TodoState = TodoState.WAITING)
 data class WorkArtifact(val jobId: String, val name: String, val size: Long)
+data class PendingAttachment(val name: String, val mime: String, val text: String? = null)
 data class Conversation(val id:String=UUID.randomUUID().toString(), val title:String="Новый чат", val mode:WorkspaceMode=WorkspaceMode.CHAT, val messages:List<ChatMessage> = emptyList(), val todos:List<WorkTodo> = emptyList(), val artifact:WorkArtifact?=null, val jobId:String?=null, val updatedAt:Long=System.currentTimeMillis())
-data class AppUiState(val conversations:List<Conversation> = emptyList(), val activeId:String="", val mode:WorkspaceMode=WorkspaceMode.CHAT, val input:String="", val runningIds:Set<String> = emptySet(), val drawerOpen:Boolean=false, val settingsOpen:Boolean=false, val backendUrl:String=DEFAULT_BACKEND, val deviceToken:String="", val error:String?=null) { val active get()=conversations.firstOrNull { it.id==activeId } }
+data class AppUiState(val conversations:List<Conversation> = emptyList(), val activeId:String="", val mode:WorkspaceMode=WorkspaceMode.CHAT, val input:String="", val runningIds:Set<String> = emptySet(), val drawerOpen:Boolean=false, val settingsOpen:Boolean=false, val backendUrl:String=DEFAULT_BACKEND, val deviceToken:String="", val selectedModel:String=MODEL_SUPER, val attachments:List<PendingAttachment> = emptyList(), val error:String?=null) { val active get()=conversations.firstOrNull { it.id==activeId } }
 
 const val DEFAULT_BACKEND="https://workai-backend.lolkeckay222.workers.dev"
+const val MODEL_SUPER="nvidia/nemotron-3-super-120b-a12b"
+const val MODEL_ULTRA="nvidia/nemotron-3-ultra-550b-a55b"
 
 class AgentViewModel(app:Application):AndroidViewModel(app) {
     private val prefs=app.getSharedPreferences("workai",0)
     private val client=OkHttpClient.Builder().connectTimeout(30,TimeUnit.SECONDS).readTimeout(180,TimeUnit.SECONDS).build()
+    private val jobs=mutableMapOf<String,Job>()
     private val _ui=MutableStateFlow(load()); val ui:StateFlow<AppUiState> = _ui.asStateFlow()
     fun setInput(v:String){_ui.value=_ui.value.copy(input=v)}
+    fun selectModel(v:String){prefs.edit().putString("model",v).apply();_ui.value=_ui.value.copy(selectedModel=v)}
+    fun addAttachments(uris:List<Uri>){val resolver=getApplication<Application>().contentResolver;val added=uris.mapNotNull{uri->runCatching{val name=resolver.query(uri,arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),null,null,null)?.use{c->if(c.moveToFirst())c.getString(0) else null}?:"Файл";val mime=resolver.getType(uri)?:"application/octet-stream";val text=if(mime.startsWith("text/")||name.endsWith(".kt")||name.endsWith(".java")||name.endsWith(".json")||name.endsWith(".xml")||name.endsWith(".md"))resolver.openInputStream(uri)?.bufferedReader()?.use{it.readText().take(200_000)}else null;PendingAttachment(name,mime,text)}.getOrNull()};_ui.value=_ui.value.copy(attachments=(_ui.value.attachments+added).take(8))}
+    fun removeAttachment(name:String){_ui.value=_ui.value.copy(attachments=_ui.value.attachments.filterNot{it.name==name})}
     fun openDrawer(v:Boolean){_ui.value=_ui.value.copy(drawerOpen=v)}
     fun openSettings(v:Boolean){_ui.value=_ui.value.copy(settingsOpen=v)}
     fun saveBackend(url:String,token:String){val clean=url.trim().trimEnd('/').ifBlank{DEFAULT_BACKEND};prefs.edit().putString("backend",clean).putString("device_token",token.trim()).apply();_ui.value=_ui.value.copy(backendUrl=clean,deviceToken=token.trim(),settingsOpen=false,error=null)}
@@ -55,16 +64,19 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
     fun deleteChat(id:String){val left=_ui.value.conversations.filterNot{it.id==id};val next=left.firstOrNull()?:Conversation();_ui.value=_ui.value.copy(conversations=left.ifEmpty{listOf(next)},activeId=if(_ui.value.activeId==id)next.id else _ui.value.activeId,mode=if(_ui.value.activeId==id)next.mode else _ui.value.mode);persist()}
 
     fun send(){
-        val prompt=_ui.value.input.trim();val chat=_ui.value.active?:return
+        val rawPrompt=_ui.value.input.trim();val chat=_ui.value.active?:return
+        val files=_ui.value.attachments
+        val prompt=buildString{append(rawPrompt);files.forEach{f->append("\n\n[Прикреплён файл: ${f.name}, ${f.mime}]");f.text?.let{append("\n");append(it)}}}
         if(prompt.isBlank()||chat.id in _ui.value.runningIds)return
         if(_ui.value.deviceToken.length<20){_ui.value=_ui.value.copy(settingsOpen=true,error="Введите WORKAI_DEVICE_TOKEN из GitHub Secrets");return}
         val title=if(chat.messages.isEmpty())prompt.take(42)else chat.title
         update(chat.id){it.copy(title=title,messages=it.messages+ChatMessage(MessageRole.USER,prompt),artifact=null,updatedAt=System.currentTimeMillis())}
-        _ui.value=_ui.value.copy(input="",runningIds=_ui.value.runningIds+chat.id,error=null)
-        viewModelScope.launch{try{if(chat.mode==WorkspaceMode.CHAT)runChat(chat.id)else runWork(chat.id,prompt)}catch(e:Throwable){update(chat.id){c->c.copy(messages=c.messages+ChatMessage(MessageRole.ASSISTANT,"Ошибка: ${e.message}"),todos=c.todos.map{if(it.state==TodoState.RUNNING)it.copy(state=TodoState.FAILED)else it})};_ui.value=_ui.value.copy(error=e.message)}finally{_ui.value=_ui.value.copy(runningIds=_ui.value.runningIds-chat.id);persist()}}
+        _ui.value=_ui.value.copy(input="",attachments=emptyList(),runningIds=_ui.value.runningIds+chat.id,error=null)
+        jobs[chat.id]=viewModelScope.launch{try{if(chat.mode==WorkspaceMode.CHAT)runChat(chat.id)else runWork(chat.id,prompt)}catch(e:kotlinx.coroutines.CancellationException){update(chat.id){c->c.copy(messages=c.messages+ChatMessage(MessageRole.ASSISTANT,"Остановлено пользователем."))}}catch(e:Throwable){update(chat.id){c->c.copy(messages=c.messages+ChatMessage(MessageRole.ASSISTANT,"Не удалось получить ответ. Попробуйте ещё раз через несколько секунд."),todos=c.todos.map{if(it.state==TodoState.RUNNING)it.copy(state=TodoState.FAILED)else it})};_ui.value=_ui.value.copy(error=e.message)}finally{jobs.remove(chat.id);_ui.value=_ui.value.copy(runningIds=_ui.value.runningIds-chat.id);persist()}}
     }
+    fun stop(){_ui.value.activeId.let{jobs[it]?.cancel()}}
 
-    private suspend fun runChat(id:String){val chat=_ui.value.conversations.first{it.id==id};val a=JSONArray();chat.messages.takeLast(30).forEach{a.put(JSONObject().put("role",if(it.role==MessageRole.USER)"user" else "assistant").put("content",it.text))};val r=api("/v1/chat","POST",JSONObject().put("messages",a));update(id){it.copy(messages=it.messages+ChatMessage(MessageRole.ASSISTANT,r.getString("answer")),updatedAt=System.currentTimeMillis())}}
+    private suspend fun runChat(id:String){val chat=_ui.value.conversations.first{it.id==id};val a=JSONArray();chat.messages.takeLast(30).forEach{a.put(JSONObject().put("role",if(it.role==MessageRole.USER)"user" else "assistant").put("content",it.text))};val r=api("/v1/chat","POST",JSONObject().put("messages",a).put("model",_ui.value.selectedModel));update(id){it.copy(messages=it.messages+ChatMessage(MessageRole.ASSISTANT,r.getString("answer")),updatedAt=System.currentTimeMillis())}}
 
     private suspend fun runWork(id:String,prompt:String){
         val kind=when{prompt.contains("mtz",true)||prompt.contains("тема",true)->"mtz";prompt.contains("zip",true)||prompt.contains("архив",true)->"zip";else->"apk"}
@@ -78,5 +90,5 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
     private suspend fun api(path:String,method:String,body:JSONObject?=null):JSONObject=withContext(Dispatchers.IO){val b=builder(path);if(method=="POST")b.post((body?:JSONObject()).toString().toRequestBody("application/json".toMediaType()))else b.get();client.newCall(b.build()).execute().use{r->val text=r.body?.string().orEmpty();if(!r.isSuccessful)error("Backend ${r.code}: ${runCatching{JSONObject(text).optString("detail",text)}.getOrDefault(text).take(400)}");JSONObject(text)}}
     private fun update(id:String,f:(Conversation)->Conversation){_ui.value=_ui.value.copy(conversations=_ui.value.conversations.map{if(it.id==id)f(it)else it});persist()}
     private fun persist(){val root=JSONArray();_ui.value.conversations.forEach{c->val m=JSONArray();c.messages.forEach{m.put(JSONObject().put("role",it.role.name).put("text",it.text).put("at",it.createdAt))};root.put(JSONObject().put("id",c.id).put("title",c.title).put("mode",c.mode.name).put("updated",c.updatedAt).put("messages",m))};prefs.edit().putString("chats",root.toString()).putString("active",_ui.value.activeId).apply()}
-    private fun load():AppUiState{val saved=mutableListOf<Conversation>();runCatching{val a=JSONArray(prefs.getString("chats","[]"));for(i in 0 until a.length()){val o=a.getJSONObject(i);val m=mutableListOf<ChatMessage>();val ma=o.optJSONArray("messages")?:JSONArray();for(j in 0 until ma.length())ma.getJSONObject(j).let{m+=ChatMessage(MessageRole.valueOf(it.getString("role")),it.getString("text"),it.optLong("at"))};saved+=Conversation(id=o.getString("id"),title=o.getString("title"),mode=WorkspaceMode.valueOf(o.getString("mode")),messages=m,updatedAt=o.optLong("updated"))}};val chats=saved.ifEmpty{listOf(Conversation())};val active=prefs.getString("active",null)?.takeIf{id->chats.any{it.id==id}}?:chats.first().id;val selected=chats.first{it.id==active};return AppUiState(conversations=chats,activeId=active,mode=selected.mode,backendUrl=prefs.getString("backend",DEFAULT_BACKEND)?:DEFAULT_BACKEND,deviceToken=prefs.getString("device_token","").orEmpty())}
+    private fun load():AppUiState{val saved=mutableListOf<Conversation>();runCatching{val a=JSONArray(prefs.getString("chats","[]"));for(i in 0 until a.length()){val o=a.getJSONObject(i);val m=mutableListOf<ChatMessage>();val ma=o.optJSONArray("messages")?:JSONArray();for(j in 0 until ma.length())ma.getJSONObject(j).let{m+=ChatMessage(MessageRole.valueOf(it.getString("role")),it.getString("text"),it.optLong("at"))};saved+=Conversation(id=o.getString("id"),title=o.getString("title"),mode=WorkspaceMode.valueOf(o.getString("mode")),messages=m,updatedAt=o.optLong("updated"))}};val chats=saved.ifEmpty{listOf(Conversation())};val active=prefs.getString("active",null)?.takeIf{id->chats.any{it.id==id}}?:chats.first().id;val selected=chats.first{it.id==active};return AppUiState(conversations=chats,activeId=active,mode=selected.mode,backendUrl=prefs.getString("backend",DEFAULT_BACKEND)?:DEFAULT_BACKEND,deviceToken=prefs.getString("device_token","").orEmpty(),selectedModel=prefs.getString("model",MODEL_SUPER)?:MODEL_SUPER)}
 }
