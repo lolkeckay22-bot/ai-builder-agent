@@ -1,0 +1,63 @@
+name: WorkAI agent build
+run-name: WorkAI ${{ github.event.client_payload.kind }} · ${{ github.event.client_payload.id }}
+
+on:
+  repository_dispatch:
+    types: [workai_build]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      JOB_ID: ${{ github.event.client_payload.id }}
+      KIND: ${{ github.event.client_payload.kind }}
+      PROMPT: ${{ github.event.client_payload.prompt }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Reading request
+        uses: actions/checkout@v4
+      - name: Planning files
+        run: |
+          python3 builder/generate.py generate --kind "$KIND" --job "$JOB_ID" --prompt "$PROMPT"
+      - name: Preparing Android SDK
+        if: env.KIND == 'apk'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Preparing Gradle
+        if: env.KIND == 'apk'
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: '8.9'
+      - name: Building APK
+        if: env.KIND == 'apk'
+        run: |
+          mkdir -p output
+          success=0
+          for attempt in 1 2 3; do
+            if gradle -p generated --no-daemon :app:assembleDebug 2>&1 | tee build.log; then success=1; break; fi
+            python3 builder/generate.py repair --log build.log
+          done
+          test "$success" = 1
+          cp generated/app/build/outputs/apk/debug/app-debug.apk "output/WorkAI-${JOB_ID}.apk"
+      - name: Verifying artifact
+        run: |
+          test -n "$(find output -type f -size +100c -print -quit)"
+          sha256sum output/* | tee output/SHA256SUMS.txt
+      - name: Publishing artifact
+        run: |
+          gh release delete "job-${JOB_ID}" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "job-${JOB_ID}" output/* --title "WorkAI result ${JOB_ID}" --notes "Generated and verified by WorkAI" --latest=false
+      - name: Uploading backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkAI-${{ env.JOB_ID }}
+          path: output/*
+          retention-days: 7
