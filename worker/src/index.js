@@ -19,26 +19,46 @@ function authorized(request, env) {
   return supplied.length > 20 && supplied === env.WORKAI_DEVICE_TOKEN;
 }
 
-async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45) {
-  const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "authorization": `Bearer ${env.NVIDIA_API_KEY}`,
-      "content-type": "application/json",
-      "accept": "application/json",
-    },
-    body: JSON.stringify({
-      model: env.NVIDIA_MODEL,
-      messages,
-      temperature,
-      max_tokens: maxTokens,
-      stream: false,
-    }),
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`NVIDIA ${response.status}: ${text.slice(0, 500)}`);
-  const data = JSON.parse(text);
-  return data.choices?.[0]?.message?.content?.trim() || "";
+const ALLOWED_MODELS = new Set([
+  "nvidia/nemotron-3-super-120b-a12b",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+]);
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, requestedModel) {
+  const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : (env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b");
+  let lastStatus = 0;
+  let lastText = "";
+  for (let attempt = 0; attempt < 5; attempt++) {
+    let response;
+    try {
+      response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "authorization": `Bearer ${env.NVIDIA_API_KEY}`,
+          "content-type": "application/json",
+          "accept": "application/json",
+        },
+        body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens, stream: false }),
+      });
+      lastStatus = response.status;
+      lastText = await response.text();
+      if (response.ok) {
+        const data = JSON.parse(lastText);
+        return data.choices?.[0]?.message?.content?.trim() || "";
+      }
+      if (![408, 429, 500, 502, 503, 504].includes(response.status)) break;
+      const retryAfter = Number(response.headers.get("retry-after"));
+      const backoff = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 700 * (2 ** attempt) + Math.floor(Math.random() * 350);
+      await sleep(Math.min(backoff, 9000));
+    } catch (error) {
+      lastText = String(error?.message || error);
+      if (attempt === 4) break;
+      await sleep(700 * (2 ** attempt));
+    }
+  }
+  throw new Error(`NVIDIA ${lastStatus || "network"}: ${lastText.slice(0, 300)}`);
 }
 
 async function github(env, path, init = {}) {
@@ -156,8 +176,9 @@ export default {
       if (url.pathname === "/v1/chat" && request.method === "POST") {
         const body = await request.json();
         const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
-        const answer = await nvidia(env, [{ role: "system", content: "Ты WorkAI, точный русскоязычный ассистент." }, ...messages]);
-        return json({ answer }, 200, cors(request));
+        const model = ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL;
+        const answer = await nvidia(env, [{ role: "system", content: `Ты WorkAI, точный русскоязычный ассистент. Текущая модель: ${model}. Если тебя спрашивают о модели, назови именно её.` }, ...messages], 2048, 0.45, model);
+        return json({ answer, model }, 200, cors(request));
       }
       if (url.pathname === "/v1/jobs" && request.method === "POST") return await startJob(request, env, url);
       const match = url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)(\/download)?$/);
