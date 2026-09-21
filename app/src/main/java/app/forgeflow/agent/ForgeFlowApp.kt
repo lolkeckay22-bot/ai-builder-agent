@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -21,9 +22,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
 
@@ -138,12 +143,21 @@ private fun EmptyState(mode: WorkspaceMode) {
 @Composable
 private fun MessageBubble(message: ChatMessage) {
     val user = message.role == MessageRole.USER
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
+    val clipboard = LocalClipboardManager.current
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = if (user) Alignment.End else Alignment.Start) {
+        IconButton(
+            onClick = { clipboard.setText(AnnotatedString(message.text)) },
+            modifier = Modifier.size(30.dp)
+        ) { Icon(Icons.Default.ContentCopy, "Копировать", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
         Surface(
             shape = RoundedCornerShape(if (user) 22.dp else 10.dp),
             color = if (user) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
             modifier = Modifier.widthIn(max = 340.dp).animateContentSize()
-        ) { Text(message.text, modifier = Modifier.padding(if (user) 14.dp else 4.dp), style = MaterialTheme.typography.bodyLarge) }
+        ) {
+            SelectionContainer {
+                Text(message.text, modifier = Modifier.padding(if (user) 14.dp else 4.dp), style = MaterialTheme.typography.bodyLarge)
+            }
+        }
     }
 }
 
@@ -204,25 +218,42 @@ private fun ArtifactCard(artifact: WorkArtifact, onDownload: () -> Unit, onShare
 @Composable
 private fun Composer(ui: AppUiState, vm: AgentViewModel) {
     val running = ui.activeId in ui.runningIds
+    var modelsOpen by remember { mutableStateOf(false) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> vm.addAttachments(uris) }
     Surface(color = MaterialTheme.colorScheme.background, tonalElevation = 2.dp) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp).navigationBarsPadding().imePadding(),
-            verticalAlignment = Alignment.Bottom
-        ) {
-            IconButton(onClick = { /* Android picker подключается следующим коммитом */ }) { Icon(Icons.Default.Add, "Добавить файл") }
-            OutlinedTextField(
-                value = ui.input,
-                onValueChange = vm::setInput,
-                modifier = Modifier.weight(1f),
-                placeholder = { Text(if (ui.mode == WorkspaceMode.CHAT) "Сообщение…" else "Опишите задачу…") },
-                shape = RoundedCornerShape(26.dp),
-                maxLines = 5,
-                trailingIcon = {
-                    FilledIconButton(onClick = vm::send, enabled = ui.input.isNotBlank() && !running, colors = IconButtonDefaults.filledIconButtonColors(containerColor = if (ui.input.isNotBlank()) Accent else MaterialTheme.colorScheme.surfaceVariant)) {
-                        Icon(if (running) Icons.Default.Stop else Icons.Default.ArrowUpward, if (running) "Остановить" else "Отправить")
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp).navigationBarsPadding()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    TextButton(onClick = { modelsOpen = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                        Icon(Icons.Default.Memory, null, Modifier.size(16.dp)); Spacer(Modifier.width(5.dp))
+                        Text(if (ui.selectedModel == MODEL_ULTRA) "Nemotron Ultra 550B" else "Nemotron Super 120B", style = MaterialTheme.typography.labelMedium)
+                        Icon(Icons.Default.ArrowDropDown, null, Modifier.size(18.dp))
+                    }
+                    DropdownMenu(expanded = modelsOpen, onDismissRequest = { modelsOpen = false }) {
+                        DropdownMenuItem(text = { Text("Nemotron Super 120B") }, leadingIcon = { if (ui.selectedModel == MODEL_SUPER) Icon(Icons.Default.Check, null) }, onClick = { vm.selectModel(MODEL_SUPER); modelsOpen = false })
+                        DropdownMenuItem(text = { Text("Nemotron Ultra 550B") }, leadingIcon = { if (ui.selectedModel == MODEL_ULTRA) Icon(Icons.Default.Check, null) }, onClick = { vm.selectModel(MODEL_ULTRA); modelsOpen = false })
                     }
                 }
-            )
+            }
+            if (ui.attachments.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ui.attachments.take(3).forEach { file -> InputChip(selected = true, onClick = { vm.removeAttachment(file.name) }, label = { Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis) }, trailingIcon = { Icon(Icons.Default.Close, "Убрать", Modifier.size(15.dp)) }, modifier = Modifier.widthIn(max = 150.dp)) }
+            }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+                IconButton(onClick = { picker.launch(arrayOf("*/*")) }) { Icon(Icons.Default.Add, "Добавить файл") }
+                OutlinedTextField(
+                    value = ui.input,
+                    onValueChange = vm::setInput,
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text(if (ui.mode == WorkspaceMode.CHAT) "Сообщение…" else "Опишите задачу…") },
+                    shape = RoundedCornerShape(26.dp),
+                    maxLines = 5,
+                    trailingIcon = {
+                        FilledIconButton(onClick = { if (running) vm.stop() else vm.send() }, enabled = running || ui.input.isNotBlank(), colors = IconButtonDefaults.filledIconButtonColors(containerColor = if (running || ui.input.isNotBlank()) Accent else MaterialTheme.colorScheme.surfaceVariant)) {
+                            Icon(if (running) Icons.Default.Stop else Icons.Default.ArrowUpward, if (running) "Остановить" else "Отправить")
+                        }
+                    }
+                )
+            }
         }
     }
 }
