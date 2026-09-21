@@ -108,7 +108,7 @@ private fun ConversationBody(chat: Conversation, running: Boolean, modifier: Mod
 
 @Composable
 private fun EmptyState(mode: WorkspaceMode) {
-    Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize().padding(top = 96.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(bottom = 48.dp)) {
             Surface(shape = CircleShape, color = Accent.copy(alpha = .14f)) { Icon(if (mode == WorkspaceMode.CHAT) Icons.Default.AutoAwesome else Icons.Default.Terminal, null, tint = Accent, modifier = Modifier.padding(18.dp).size(28.dp)) }
             Spacer(Modifier.height(16.dp))
