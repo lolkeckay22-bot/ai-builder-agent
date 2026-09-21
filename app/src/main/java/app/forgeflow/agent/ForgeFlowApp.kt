@@ -1,9 +1,5 @@
 package app.forgeflow.agent
 
-import android.content.Intent
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
@@ -11,158 +7,234 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.*
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.launch
 
-private val Ink = Color(0xFF151515)
-private val Cloud = Color(0xFFF7F7F5)
-private val Lime = Color(0xFFB8F248)
+private val Accent = Color(0xFF10A37F)
 
 @Composable
 fun ForgeFlowApp(vm: AgentViewModel = viewModel()) {
     val ui by vm.ui.collectAsState()
-    val dark = androidx.compose.foundation.isSystemInDarkTheme()
-    val scheme = if (dark) darkColorScheme(primary = Lime, background = Color(0xFF0F0F10), surface = Color(0xFF19191B))
-    else lightColorScheme(primary = Ink, background = Cloud, surface = Color.White)
-    MaterialTheme(colorScheme = scheme) {
-        Surface(Modifier.fillMaxSize()) { TaskScreen(ui, vm::updatePrompt, vm::attach, vm::run) }
-    }
-}
+    val drawerState = rememberDrawerState(if (ui.drawerOpen) DrawerValue.Open else DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(ui.drawerOpen) { if (ui.drawerOpen) drawerState.open() else drawerState.close() }
+    LaunchedEffect(drawerState.currentValue) { if (drawerState.isClosed && ui.drawerOpen) vm.openDrawer(false) }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun TaskScreen(ui: TaskUi, onPrompt: (String) -> Unit, onAttach: (String) -> Unit, onRun: () -> Unit) {
-    val context = LocalContext.current
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        uris.forEach { uri ->
-            context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            onAttach(uri.lastPathSegment?.substringAfterLast('/') ?: "attachment")
-        }
-    }
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = { Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("ForgeFlow", fontWeight = FontWeight.SemiBold)
-                    Text("AI workspace", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }},
-                navigationIcon = { IconButton({}) { Icon(Icons.Outlined.Menu, "History") } },
-                actions = { IconButton({}) { Icon(Icons.Outlined.Settings, "Settings") } }
-            )
-        },
-        bottomBar = {
-            Composer(ui, onPrompt, { picker.launch(arrayOf("*/*")) }, onRun)
-        }
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+    MaterialTheme(colorScheme = darkColorScheme(primary = Accent, surface = Color(0xFF171719), background = Color(0xFF111113))) {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            gesturesEnabled = true,
+            drawerContent = { HistoryDrawer(ui, vm) }
         ) {
-            item { IntroCard() }
-            if (ui.prompt.isNotBlank() && ui.state != AgentState.IDLE) item { UserPrompt(ui.prompt) }
-            if (ui.attachedNames.isNotEmpty()) item { AttachmentRow(ui.attachedNames) }
-            if (ui.steps.isNotEmpty()) item { ActivityCard(ui) }
-            items(ui.artifacts) { ArtifactCard(it) }
-        }
-    }
-}
-
-@Composable private fun IntroCard() {
-    Column(Modifier.fillMaxWidth().padding(top = 36.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(Modifier.size(58.dp).background(MaterialTheme.colorScheme.primary, RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {
-            Icon(Icons.Outlined.AutoAwesome, null, tint = MaterialTheme.colorScheme.onPrimary)
-        }
-        Spacer(Modifier.height(18.dp))
-        Text("What should I build?", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-        Text("Describe a file or app. ForgeFlow will plan, work, build and verify it.", modifier = Modifier.padding(12.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable private fun UserPrompt(text: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-        Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(22.dp, 22.dp, 5.dp, 22.dp)) {
-            Text(text, Modifier.padding(horizontal = 16.dp, vertical = 12.dp).widthIn(max = 300.dp))
-        }
-    }
-}
-
-@Composable private fun AttachmentRow(names: List<String>) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { names.forEach { name ->
-        Surface(shape = RoundedCornerShape(14.dp), tonalElevation = 1.dp) {
-            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.InsertDriveFile, null)
-                Spacer(Modifier.width(10.dp)); Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                Workspace(ui, vm) { scope.launch { vm.openDrawer(true) } }
             }
         }
-    }}
+        if (ui.settingsOpen) ApiSettings(ui.apiKey, ui.error, onDismiss = { vm.openSettings(false) }, onSave = vm::saveApiKey)
+    }
 }
 
-@Composable private fun ActivityCard(ui: TaskUi) {
-    ElevatedCard(Modifier.fillMaxWidth().animateContentSize(), shape = RoundedCornerShape(20.dp)) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
-            AnimatedContent(ui.state, label = "state") { state ->
+@Composable
+private fun Workspace(ui: AppUiState, vm: AgentViewModel, openHistory: () -> Unit) {
+    val chat = ui.active
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        TopAppBar(
+            title = {
+                Column {
+                    Text(chat?.title ?: "ForgeFlow", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                    if (chat?.id in ui.runningIds) Text("Nemotron работает…", color = Accent, style = MaterialTheme.typography.labelSmall)
+                }
+            },
+            navigationIcon = { IconButton(onClick = openHistory) { Icon(Icons.Default.Menu, "История") } },
+            actions = {
+                IconButton(onClick = { vm.newChat(ui.mode) }) { Icon(Icons.Default.Edit, "Новый чат") }
+                IconButton(onClick = { vm.openSettings(true) }) { Icon(Icons.Default.MoreVert, "Настройки") }
+            },
+            colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+        )
+        ModeSelector(ui.mode, vm::switchMode)
+        if (chat != null) ConversationBody(chat, chat.id in ui.runningIds, Modifier.weight(1f))
+        Composer(ui, vm)
+    }
+}
+
+@Composable
+private fun ModeSelector(mode: WorkspaceMode, onMode: (WorkspaceMode) -> Unit) {
+    SingleChoiceSegmentedButtonRow(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).fillMaxWidth()) {
+        WorkspaceMode.entries.forEachIndexed { index, item ->
+            SegmentedButton(
+                selected = mode == item,
+                onClick = { onMode(item) },
+                shape = SegmentedButtonDefaults.itemShape(index, WorkspaceMode.entries.size),
+                label = { Text(if (item == WorkspaceMode.CHAT) "Чат" else "Работа") },
+                icon = { Icon(if (item == WorkspaceMode.CHAT) Icons.Default.ChatBubbleOutline else Icons.Default.Build, null, Modifier.size(17.dp)) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ConversationBody(chat: Conversation, running: Boolean, modifier: Modifier) {
+    val listState = rememberLazyListState()
+    val count = chat.messages.size + if (chat.todos.isNotEmpty()) 1 else 0
+    LaunchedEffect(count, running) { if (count > 0) listState.animateScrollToItem(count - 1) }
+    LazyColumn(
+        state = listState,
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        if (chat.messages.isEmpty()) item { EmptyState(chat.mode) }
+        items(chat.messages) { MessageBubble(it) }
+        if (chat.mode == WorkspaceMode.WORK && chat.todos.isNotEmpty()) item { TodoCard(chat.todos) }
+        if (running) item { TypingIndicator() }
+    }
+}
+
+@Composable
+private fun EmptyState(mode: WorkspaceMode) {
+    Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(bottom = 48.dp)) {
+            Surface(shape = CircleShape, color = Accent.copy(alpha = .14f)) { Icon(if (mode == WorkspaceMode.CHAT) Icons.Default.AutoAwesome else Icons.Default.Terminal, null, tint = Accent, modifier = Modifier.padding(18.dp).size(28.dp)) }
+            Spacer(Modifier.height(16.dp))
+            Text(if (mode == WorkspaceMode.CHAT) "Чем помочь?" else "Что нужно создать?", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Text(if (mode == WorkspaceMode.CHAT) "Контекст сохраняется отдельно для каждого чата" else "Сначала появится план, затем — выполнение", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun MessageBubble(message: ChatMessage) {
+    val user = message.role == MessageRole.USER
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
+        Surface(
+            shape = RoundedCornerShape(if (user) 22.dp else 10.dp),
+            color = if (user) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
+            modifier = Modifier.widthIn(max = 340.dp).animateContentSize()
+        ) { Text(message.text, modifier = Modifier.padding(if (user) 14.dp else 4.dp), style = MaterialTheme.typography.bodyLarge) }
+    }
+}
+
+@Composable
+private fun TodoCard(todos: List<WorkTodo>) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(18.dp)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Checklist, null, tint = Accent)
+                Spacer(Modifier.width(10.dp))
+                Text("План работы", fontWeight = FontWeight.SemiBold)
+            }
+            todos.forEach { todo ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (state != AgentState.COMPLETED && state != AgentState.FAILED) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    else Icon(if (state == AgentState.COMPLETED) Icons.Outlined.CheckCircle else Icons.Outlined.ErrorOutline, null, tint = if (state == AgentState.COMPLETED) Color(0xFF2C8B57) else MaterialTheme.colorScheme.error)
-                    Spacer(Modifier.width(10.dp)); Text(if (state == AgentState.COMPLETED) "Task completed" else "Working on your task…", fontWeight = FontWeight.SemiBold)
+                    when (todo.state) {
+                        TodoState.RUNNING -> CircularProgressIndicator(Modifier.size(19.dp), strokeWidth = 2.dp)
+                        TodoState.DONE -> Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF4CAF78), modifier = Modifier.size(19.dp))
+                        TodoState.FAILED -> Icon(Icons.Default.Error, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(19.dp))
+                        TodoState.WAITING -> Icon(Icons.Default.RadioButtonUnchecked, null, tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(19.dp))
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Text(todo.title, color = if (todo.state == TodoState.DONE) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface, textDecoration = if (todo.state == TodoState.DONE) TextDecoration.LineThrough else null)
                 }
-            }
-            HorizontalDivider()
-            ui.steps.forEach { step -> StepRow(step) }
-        }
-    }
-}
-
-@Composable private fun StepRow(step: ActivityStep) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(step.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-        when (step.state) {
-            StepState.RUNNING -> CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-            StepState.COMPLETED -> Icon(Icons.Outlined.Check, null, tint = Color(0xFF2C8B57), modifier = Modifier.size(18.dp))
-            StepState.FAILED -> Icon(Icons.Outlined.Close, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
-            StepState.WAITING -> Box(Modifier.size(8.dp).background(MaterialTheme.colorScheme.outlineVariant, CircleShape))
-        }
-    }
-}
-
-@Composable private fun ArtifactCard(artifact: Artifact) {
-    AnimatedVisibility(true) {
-        OutlinedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
-            Column(Modifier.padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.tertiaryContainer) { Icon(Icons.Outlined.Inventory2, null, Modifier.padding(10.dp)) }
-                    Spacer(Modifier.width(12.dp)); Column { Text(artifact.name, fontWeight = FontWeight.SemiBold); Text("${artifact.type} · ${artifact.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                }
-                Spacer(Modifier.height(12.dp)); Row { TextButton({}, enabled = artifact.downloadUrl.isNotBlank()) { Icon(Icons.Outlined.Download, null); Spacer(Modifier.width(6.dp)); Text("Download") }; TextButton({}, enabled = artifact.downloadUrl.isNotBlank()) { Icon(Icons.Outlined.Share, null); Spacer(Modifier.width(6.dp)); Text("Share") } }
             }
         }
     }
 }
 
-@Composable private fun Composer(ui: TaskUi, onPrompt: (String) -> Unit, onAttach: () -> Unit, onRun: () -> Unit) {
-    Surface(shadowElevation = 8.dp) {
-        Column(Modifier.navigationBarsPadding().imePadding().padding(10.dp)) {
-            Surface(shape = RoundedCornerShape(26.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .65f)) {
-                Row(Modifier.fillMaxWidth().padding(6.dp), verticalAlignment = Alignment.Bottom) {
-                    IconButton(onAttach) { Icon(Icons.Outlined.Add, "Add files") }
-                    TextField(ui.prompt, onPrompt, Modifier.weight(1f), placeholder = { Text("Describe what to create…") }, colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent), maxLines = 5)
-                    FilledIconButton(onRun, enabled = ui.prompt.isNotBlank() && ui.state !in listOf(AgentState.PLANNING, AgentState.WORKING, AgentState.BUILDING, AgentState.VERIFYING)) { Icon(Icons.Outlined.ArrowUpward, "Send") }
+@Composable
+private fun TypingIndicator() {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Accent)
+        Spacer(Modifier.width(10.dp))
+        Text("Обрабатываю запрос…", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun Composer(ui: AppUiState, vm: AgentViewModel) {
+    val running = ui.activeId in ui.runningIds
+    Surface(color = MaterialTheme.colorScheme.background, tonalElevation = 2.dp) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp).navigationBarsPadding().imePadding(),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            IconButton(onClick = { /* Android picker подключается следующим коммитом */ }) { Icon(Icons.Default.Add, "Добавить файл") }
+            OutlinedTextField(
+                value = ui.input,
+                onValueChange = vm::setInput,
+                modifier = Modifier.weight(1f),
+                placeholder = { Text(if (ui.mode == WorkspaceMode.CHAT) "Сообщение…" else "Опишите задачу…") },
+                shape = RoundedCornerShape(26.dp),
+                maxLines = 5,
+                trailingIcon = {
+                    FilledIconButton(onClick = vm::send, enabled = ui.input.isNotBlank() && !running, colors = IconButtonDefaults.filledIconButtonColors(containerColor = if (ui.input.isNotBlank()) Accent else MaterialTheme.colorScheme.surfaceVariant)) {
+                        Icon(if (running) Icons.Default.Stop else Icons.Default.ArrowUpward, if (running) "Остановить" else "Отправить")
+                    }
                 }
-            }
+            )
         }
     }
+}
+
+@Composable
+private fun HistoryDrawer(ui: AppUiState, vm: AgentViewModel) {
+    ModalDrawerSheet(modifier = Modifier.width(320.dp)) {
+        Spacer(Modifier.statusBarsPadding())
+        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("ForgeFlow", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            IconButton(onClick = { vm.newChat() }) { Icon(Icons.Default.Add, "Новый чат") }
+        }
+        HorizontalDivider()
+        LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            items(ui.conversations.sortedByDescending { it.updatedAt }, key = { it.id }) { chat ->
+                NavigationDrawerItem(
+                    selected = chat.id == ui.activeId,
+                    onClick = { vm.selectChat(chat.id) },
+                    icon = { Icon(if (chat.mode == WorkspaceMode.WORK) Icons.Default.Build else Icons.Default.ChatBubbleOutline, null) },
+                    label = {
+                        Column {
+                            Text(chat.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(if (chat.mode == WorkspaceMode.WORK) "Работа" else "Чат", style = MaterialTheme.typography.labelSmall, color = if (chat.mode == WorkspaceMode.WORK) Accent else MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    },
+                    badge = { IconButton(onClick = { vm.deleteChat(chat.id) }, Modifier.size(32.dp)) { Icon(Icons.Default.Close, "Удалить", Modifier.size(16.dp)) } }
+                )
+            }
+        }
+        Text("Nemotron 3 Super · локальная история", modifier = Modifier.padding(18.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.navigationBarsPadding())
+    }
+}
+
+@Composable
+private fun ApiSettings(initial: String, error: String?, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var key by remember(initial) { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Default.Key, null) },
+        title = { Text("NVIDIA API") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Ключ хранится только в памяти приложения и не попадает в GitHub или APK.", style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(key, { key = it }, label = { Text("API key") }, singleLine = true)
+                AnimatedVisibility(error != null) { Text(error.orEmpty(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(key) }, enabled = key.isNotBlank()) { Text("Сохранить") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } }
+    )
 }
