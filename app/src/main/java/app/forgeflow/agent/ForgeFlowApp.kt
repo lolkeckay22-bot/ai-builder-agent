@@ -70,7 +70,13 @@ private fun Workspace(ui: AppUiState, vm: AgentViewModel, openHistory: () -> Uni
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
         )
         ModeSelector(ui.mode, vm::switchMode)
-        if (chat != null) ConversationBody(chat, chat.id in ui.runningIds, Modifier.weight(1f))
+        if (chat != null) ConversationBody(
+            chat = chat,
+            running = chat.id in ui.runningIds,
+            modifier = Modifier.weight(1f),
+            onDownload = { vm.downloadArtifact(it, false) },
+            onShare = { vm.downloadArtifact(it, true) }
+        )
         Composer(ui, vm)
     }
 }
@@ -91,7 +97,13 @@ private fun ModeSelector(mode: WorkspaceMode, onMode: (WorkspaceMode) -> Unit) {
 }
 
 @Composable
-private fun ConversationBody(chat: Conversation, running: Boolean, modifier: Modifier) {
+private fun ConversationBody(
+    chat: Conversation,
+    running: Boolean,
+    modifier: Modifier,
+    onDownload: (WorkArtifact) -> Unit,
+    onShare: (WorkArtifact) -> Unit
+) {
     val listState = rememberLazyListState()
     val count = chat.messages.size + if (chat.todos.isNotEmpty()) 1 else 0
     LaunchedEffect(count, running) { if (count > 0) listState.animateScrollToItem(count - 1) }
@@ -104,7 +116,9 @@ private fun ConversationBody(chat: Conversation, running: Boolean, modifier: Mod
         if (chat.messages.isEmpty()) item { EmptyState(chat.mode) }
         items(chat.messages) { MessageBubble(it) }
         if (chat.mode == WorkspaceMode.WORK && chat.todos.isNotEmpty()) item { TodoCard(chat.todos) }
-        chat.artifact?.let { artifact -> item { ArtifactCard(artifact, onDownload = { vm.downloadArtifact(artifact, false) }, onShare = { vm.downloadArtifact(artifact, true) }) } }
+        chat.artifact?.let { artifact ->
+            item { ArtifactCard(artifact, onDownload = { onDownload(artifact) }, onShare = { onShare(artifact) }) }
+        }
         if (running) item { TypingIndicator() }
     }
 }
