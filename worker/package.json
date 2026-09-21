@@ -1,0 +1,6 @@
+{
+  "name": "workai-backend",
+  "private": true,
+  "scripts": {"deploy": "wrangler deploy"},
+  "devDependencies": {"wrangler": "^4.36.0"}
+}
