@@ -1,0 +1,8 @@
+name = "workai-backend"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+GITHUB_OWNER = "lolkeckay22-bot"
+GITHUB_REPO = "ai-builder-agent"
+NVIDIA_MODEL = "nvidia/nemotron-3-super-120b-a12b"
