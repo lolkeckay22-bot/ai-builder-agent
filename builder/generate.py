@@ -30,11 +30,23 @@ def call_ai(system, user, max_tokens=6000):
     agnes = MODEL.startswith("agnes-")
     endpoint = "https://apihub.agnes-ai.com/v1/chat/completions" if agnes else "https://integrate.api.nvidia.com/v1/chat/completions"
     key = os.environ.get("AGNES_API_KEY") if agnes else os.environ.get("NVIDIA_API_KEY")
-    if not key: raise RuntimeError("AGNES_API_KEY is not configured" if agnes else "NVIDIA_API_KEY is not configured")
-    payload = json.dumps({"model": MODEL, "messages": [{"role":"system","content":system},{"role":"user","content":user}], "temperature":0.35, "max_tokens":max_tokens, "stream":False}).encode()
+    model = MODEL
+    if agnes and not key:
+        endpoint, key, model = "https://integrate.api.nvidia.com/v1/chat/completions", os.environ.get("NVIDIA_API_KEY"), "nvidia/nemotron-3-super-120b-a12b"
+    if not key: raise RuntimeError("AI provider key is not configured")
+    payload = json.dumps({"model": model, "messages": [{"role":"system","content":system},{"role":"user","content":user}], "temperature":0.35, "max_tokens":max_tokens, "stream":False}).encode()
     req = urllib.request.Request(endpoint, data=payload, headers={"Authorization":f"Bearer {key}", "Content-Type":"application/json", "Accept":"application/json"})
-    with urllib.request.urlopen(req, timeout=180) as response:
-        return json.load(response)["choices"][0]["message"]["content"]
+    try:
+        with urllib.request.urlopen(req, timeout=180) as response:
+            return json.load(response)["choices"][0]["message"]["content"]
+    except Exception:
+        if not agnes or endpoint.startswith("https://integrate.api.nvidia.com"): raise
+        fallback_key = os.environ.get("NVIDIA_API_KEY")
+        if not fallback_key: raise
+        fallback = json.dumps({"model":"nvidia/nemotron-3-super-120b-a12b","messages":[{"role":"system","content":system},{"role":"user","content":user}],"temperature":0.35,"max_tokens":max_tokens,"stream":False}).encode()
+        request = urllib.request.Request("https://integrate.api.nvidia.com/v1/chat/completions", data=fallback, headers={"Authorization":f"Bearer {fallback_key}","Content-Type":"application/json","Accept":"application/json"})
+        with urllib.request.urlopen(request, timeout=180) as response:
+            return json.load(response)["choices"][0]["message"]["content"]
 
 def run_subagents(prompt, task_type):
     roles = [
