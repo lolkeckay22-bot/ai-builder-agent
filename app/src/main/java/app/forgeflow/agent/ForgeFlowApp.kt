@@ -23,6 +23,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -144,20 +147,48 @@ private fun EmptyState(mode: WorkspaceMode) {
 private fun MessageBubble(message: ChatMessage) {
     val user = message.role == MessageRole.USER
     val clipboard = LocalClipboardManager.current
+    var thinkingOpen by remember(message.createdAt) { mutableStateOf(message.text.isBlank()) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (user) Alignment.End else Alignment.Start) {
+        if (!user && message.thinking != null) {
+            Surface(onClick = { thinkingOpen = !thinkingOpen }, color = Color.Transparent, shape = RoundedCornerShape(12.dp)) {
+                Row(Modifier.padding(horizontal = 4.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (message.text.isBlank()) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp, color = Accent) else Icon(Icons.Default.AutoAwesome, null, Modifier.size(16.dp), tint = Accent)
+                    Spacer(Modifier.width(7.dp)); Text(if (message.text.isBlank()) "Думаю…" else "Ход работы", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(if (thinkingOpen) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(18.dp))
+                }
+            }
+            AnimatedVisibility(thinkingOpen) { Text(message.thinking, modifier = Modifier.padding(start = 4.dp, bottom = 5.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
         IconButton(
             onClick = { clipboard.setText(AnnotatedString(message.text)) },
             modifier = Modifier.size(30.dp)
         ) { Icon(Icons.Default.ContentCopy, "Копировать", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+        if (message.attachments.isNotEmpty()) Column(Modifier.widthIn(max = 340.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            message.attachments.forEach { file ->
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(14.dp)) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Surface(shape = RoundedCornerShape(10.dp), color = Accent.copy(alpha=.14f)) { Icon(if(file.name.endsWith(".mtz",true)) Icons.Default.Palette else Icons.Default.InsertDriveFile, null, tint=Accent, modifier=Modifier.padding(9.dp).size(20.dp)) }
+                        Spacer(Modifier.width(10.dp));Column { Text(file.name, fontWeight=FontWeight.Medium, maxLines=1, overflow=TextOverflow.Ellipsis);Text(if(file.name.endsWith(".mtz",true)) "Тема HyperOS · содержимое проанализировано" else file.mime, style=MaterialTheme.typography.labelSmall, color=MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+        }
         Surface(
             shape = RoundedCornerShape(if (user) 22.dp else 10.dp),
             color = if (user) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
             modifier = Modifier.widthIn(max = 340.dp).animateContentSize()
         ) {
-            SelectionContainer {
-                Text(message.text, modifier = Modifier.padding(if (user) 14.dp else 4.dp), style = MaterialTheme.typography.bodyLarge)
-            }
+            MarkdownText(message.text, Modifier.padding(if (user) 14.dp else 4.dp))
         }
+    }
+}
+
+@Composable
+private fun MarkdownText(source:String, modifier:Modifier=Modifier){
+    val parts=source.split("```")
+    Column(modifier, verticalArrangement=Arrangement.spacedBy(8.dp)){
+        parts.forEachIndexed{index,part->if(index%2==1){Surface(color=Color(0xFF202124),shape=RoundedCornerShape(10.dp),modifier=Modifier.fillMaxWidth()){SelectionContainer{Text(part.trim().substringAfter('\n',part.trim()),Modifier.padding(12.dp),fontFamily=FontFamily.Monospace,style=MaterialTheme.typography.bodySmall)}}}else if(part.isNotEmpty()){val styled=buildAnnotatedString{var cursor=0;val regex=Regex("\\*\\*(.+?)\\*\\*|`([^`]+)`");regex.findAll(part).forEach{m->append(part.substring(cursor,m.range.first));if(m.groupValues[1].isNotEmpty())pushStyle(SpanStyle(fontWeight=FontWeight.Bold))else pushStyle(SpanStyle(fontFamily=FontFamily.Monospace,background=MaterialTheme.colorScheme.surfaceVariant));append(m.groupValues[1].ifEmpty{m.groupValues[2]});pop();cursor=m.range.last+1};append(part.substring(cursor))};SelectionContainer{Text(styled,style=MaterialTheme.typography.bodyLarge)}}}
     }
 }
 
