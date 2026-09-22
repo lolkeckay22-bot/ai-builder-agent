@@ -144,8 +144,30 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
         }
         val payloadFiles=JSONArray();files.forEach{file->val chunks=JSONArray();var offset=0;var index=0;while(offset<file.bytes.size){val end=minOf(offset+5*1024*1024,file.bytes.size);val part=file.bytes.copyOfRange(offset,end);val uploaded=uploadChunk(id,part,index);chunks.put(JSONObject().put("sha",uploaded.getString("sha")).put("sha256",uploaded.getString("sha256")).put("size",part.size).put("index",index));offset=end;index++};payloadFiles.put(JSONObject().put("name",file.name).put("mime",file.mime).put("chunks",chunks).put("size",file.bytes.size).put("sha256",sha256(file.bytes)))}
         val started=api("/v1/jobs","POST",JSONObject().put("prompt",prompt).put("kind",kind).put("attachments",payloadFiles).put("model",_ui.value.selectedModel).put("reasoning_effort",_ui.value.reasoningEffort).put("system_prompt",_ui.value.systemPrompt),id);val job=started.getString("id");val t=started.optJSONArray("tasks")?:JSONArray();val todos=(0 until t.length()).map{WorkTodo(t.getString(it),if(it==0)TodoState.RUNNING else TodoState.WAITING)};update(id){it.copy(jobId=job,todos=todos)}
-        repeat(300){delay(5000);val s=api("/v1/jobs/$job","GET");val status=s.optString("status");val conclusion=s.optString("conclusion");update(id){c->val next=when{status=="completed"&&conclusion=="success"->c.todos.map{x->x.copy(state=TodoState.DONE)};status=="completed"->c.todos.mapIndexed{index,x->if(index==c.todos.indexOfFirst{it.state!=TodoState.DONE})x.copy(state=TodoState.FAILED)else x};status=="in_progress"->c.todos.mapIndexed{index,x->when{index}{0->x.copy(state=TodoState.DONE);1->x.copy(state=TodoState.RUNNING);else->x}};else->c.todos};c.copy(todos=next)};if(status=="completed"){if(conclusion!="success")error("Создание файла завершилось с ошибкой");val a=s.optJSONObject("artifact")?:error("Файл не найден");update(id){it.copy(artifact=WorkArtifact(job,a.getString("name"),a.optLong("size")),messages=it.messages+ChatMessage(MessageRole.ASSISTANT,"Готово. Файл создан, проверен и доступен для скачивания."),updatedAt=System.currentTimeMillis())};return}}
+        repeat(300){
+            delay(5000)
+            val s=api("/v1/jobs/$job","GET")
+            val status=s.optString("status")
+            val conclusion=s.optString("conclusion")
+            update(id){c->c.copy(todos=updatedTodos(c.todos,status,conclusion))}
+            if(status=="completed"){
+                if(conclusion!="success")error("Создание файла завершилось с ошибкой")
+                val a=s.optJSONObject("artifact")?:error("Файл не найден")
+                update(id){it.copy(artifact=WorkArtifact(job,a.getString("name"),a.optLong("size")),messages=it.messages+ChatMessage(MessageRole.ASSISTANT,"Готово. Файл создан, проверен и доступен для скачивания."),updatedAt=System.currentTimeMillis())}
+                return
+            }
+        }
         error("Превышено время ожидания сборки")
+    }
+
+    private fun updatedTodos(items:List<WorkTodo>,status:String,conclusion:String):List<WorkTodo>{
+        if(status=="completed"&&conclusion=="success")return items.map{it.copy(state=TodoState.DONE)}
+        if(status=="completed"){
+            val failed=items.indexOfFirst{it.state!=TodoState.DONE}.let{if(it<0)items.lastIndex else it}
+            return items.mapIndexed{index,item->if(index==failed)item.copy(state=TodoState.FAILED)else item}
+        }
+        if(status=="in_progress")return items.mapIndexed{index,item->when(index){0->item.copy(state=TodoState.DONE);1->item.copy(state=TodoState.RUNNING);else->item}}
+        return items
     }
 
     fun downloadArtifact(a:WorkArtifact,share:Boolean){viewModelScope.launch{try{val uri=withContext(Dispatchers.IO){client.newCall(builder("/v1/jobs/${a.jobId}/download").get().build()).execute().use{r->if(!r.isSuccessful)error("Download ${r.code}");val values=ContentValues().apply{put(MediaStore.Downloads.DISPLAY_NAME,a.name);put(MediaStore.Downloads.MIME_TYPE,if(a.name.endsWith(".apk"))"application/vnd.android.package-archive" else "application/octet-stream");put(MediaStore.Downloads.IS_PENDING,1)};val resolver=getApplication<Application>().contentResolver;val u=resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI,values)?:error("Не удалось создать файл");resolver.openOutputStream(u)!!.use{o->r.body!!.byteStream().copyTo(o)};values.clear();values.put(MediaStore.Downloads.IS_PENDING,0);resolver.update(u,values,null,null);u}};_ui.value=_ui.value.copy(error="Сохранено: ${a.name}");if(share){val i=Intent(Intent.ACTION_SEND).apply{type=if(a.name.endsWith(".apk"))"application/vnd.android.package-archive" else "application/octet-stream";putExtra(Intent.EXTRA_STREAM,uri);addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)};getApplication<Application>().startActivity(Intent.createChooser(i,"Поделиться").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))}}catch(e:Throwable){_ui.value=_ui.value.copy(error=e.message)}}}
