@@ -33,6 +33,10 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.viewinterop.AndroidView
 import android.widget.TextView
 import android.text.method.LinkMovementMethod
@@ -65,7 +69,7 @@ fun ForgeFlowApp(vm: AgentViewModel = viewModel()) {
                 Workspace(ui, vm) { scope.launch { vm.openDrawer(true) } }
             }
         }
-        if (ui.settingsOpen) BackendSettings(ui.backendUrl, ui.deviceToken, ui.error, onDismiss = { vm.openSettings(false) }, onSave = vm::saveBackend)
+        if (ui.settingsOpen) BackendSettings(ui.backendUrl, ui.deviceToken, ui.systemPrompt, ui.error, onDismiss = { vm.openSettings(false) }, onSave = vm::saveBackend)
     }
 }
 
@@ -80,7 +84,7 @@ private fun Workspace(ui: AppUiState, vm: AgentViewModel, openHistory: () -> Uni
             title = { Text(if(chat?.messages?.isNotEmpty()==true) if(chat.mode==WorkspaceMode.WORK) "Работа" else "Чат" else "Новый чат", style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold) },
             navigationIcon = { FilledIconButton(onClick = openDrawer, colors=IconButtonDefaults.filledIconButtonColors(containerColor=Color(0xFF242424))) { Icon(Icons.Default.Menu, "История") } },
             actions = {
-                IconButton(onClick = { vm.newChat(ui.mode) }) { Icon(Icons.Default.Create, "Новый чат") }
+                IconButton(onClick = { vm.newChat(ui.mode) }) { Icon(painterResource(app.forgeflow.agent.R.drawable.ic_square_pen), "Новый чат") }
                 IconButton(onClick = { vm.openSettings(true) }) { Icon(Icons.Default.MoreVert, "Настройки") }
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
@@ -278,38 +282,46 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
                         AssistChip(onClick={reasoningOpen=true},label={Text(reasoningLabel(ui.reasoningEffort))},leadingIcon={Icon(Icons.Default.Psychology,null,Modifier.size(17.dp))},colors=AssistChipDefaults.assistChipColors(labelColor=if(ui.reasoningEffort=="none")Color.White else Accent,leadingIconContentColor=if(ui.reasoningEffort=="none")Color.White else Accent))
                         TextButton(onClick={modelsOpen=true},contentPadding=PaddingValues(horizontal=8.dp)){Text(if(ui.selectedModel==MODEL_ULTRA)"Ultra" else "Super",color=Color.White);Icon(Icons.Default.KeyboardArrowDown,null,Modifier.size(17.dp))}
                         Spacer(Modifier.weight(1f))
-                        FilledIconButton(onClick={if(running)vm.stop() else vm.send()},enabled=running||ui.input.isNotBlank()||ui.attachments.isNotEmpty(),colors=IconButtonDefaults.filledIconButtonColors(containerColor=if(running||ui.input.isNotBlank()||ui.attachments.isNotEmpty())Accent else Color(0xFF3B3B3B))){Icon(if(running)Icons.Default.Stop else Icons.Default.ArrowUpward,if(running)"Остановить" else "Отправить")}
+                        val canSend=running||ui.input.isNotBlank()||ui.attachments.isNotEmpty()
+                        Surface(shape=CircleShape,color=if(canSend)Accent else Color(0xFF3B3B3B),modifier=Modifier.size(40.dp).pointerInput(canSend,running){detectTapGestures(onTap={if(canSend){if(running)vm.stop() else vm.send()}},onLongPress={if(!running)reasoningOpen=true})}){Box(contentAlignment=Alignment.Center){Icon(if(running)Icons.Default.Stop else Icons.Default.ArrowUpward,if(running)"Остановить" else "Отправить",tint=if(canSend)Color.White else Color(0xFF8A8A8A))}}
                     }
                 }
             }
         }
     }
-    if(reasoningOpen) ReasoningSheet(ui,onDismiss={reasoningOpen=false},onSelect={vm.selectReasoning(it);reasoningOpen=false})
+    if(reasoningOpen) ReasoningPopup(ui,onDismiss={reasoningOpen=false},onSelect={vm.selectReasoning(it)})
     if(modelsOpen) ModalBottomSheet(onDismissRequest={modelsOpen=false},containerColor=Color(0xFF202020)){
         Text("Настройка",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.align(Alignment.CenterHorizontally).padding(vertical=8.dp))
-        Text("Интеллект",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(horizontal=24.dp,vertical=8.dp))
-        ReasoningChoices(ui,vm::selectReasoning)
-        HorizontalDivider(Modifier.padding(vertical=8.dp))
-        Text("Модель",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(horizontal=24.dp,vertical=8.dp))
-        ModelRow("Nemotron Super 120B","none · low · high",ui.selectedModel==MODEL_SUPER){vm.selectModel(MODEL_SUPER)}
-        ModelRow("Nemotron Ultra 550B","none · medium · high",ui.selectedModel==MODEL_ULTRA){vm.selectModel(MODEL_ULTRA)}
+        TextButton(onClick={vm.selectModel(if(ui.selectedModel==MODEL_SUPER)MODEL_ULTRA else MODEL_SUPER)},modifier=Modifier.align(Alignment.CenterHorizontally)){Text((if(ui.selectedModel==MODEL_ULTRA)"Nemotron Ultra 550B" else "Nemotron Super 120B")+"  "+reasoningLabel(ui.reasoningEffort),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold,color=Color.White);Icon(Icons.Default.ChevronRight,null)}
+        IntelligenceSlider(ui,vm::selectReasoning)
+        Text("Нажмите название для смены модели",color=Color(0xFF9A9A9A),style=MaterialTheme.typography.bodySmall,modifier=Modifier.align(Alignment.CenterHorizontally).padding(top=12.dp))
         Spacer(Modifier.navigationBarsPadding().height(16.dp))
     }
 }
 
 private fun reasoningLabel(value:String)=when(value){"none"->"Без размышления";"low"->"Низкий";"medium"->"Средний";else->"Высокий"}
 
-@Composable private fun ReasoningChoices(ui:AppUiState,onSelect:(String)->Unit){
+@Composable private fun IntelligenceSlider(ui:AppUiState,onSelect:(String)->Unit){
     val values=if(ui.selectedModel==MODEL_ULTRA)listOf("none","medium","high") else listOf("none","low","high")
-    values.forEach{value->ModelRow(reasoningLabel(value),when(value){"none"->"Быстрый ответ без reasoning-токенов";"high"->"Полное размышление";else->"Экономное размышление"},ui.reasoningEffort==value){onSelect(value)}}
+    Column(Modifier.padding(horizontal=28.dp,vertical=18.dp)){
+        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){values.forEach{Text(reasoningLabel(it),color=if(it==ui.reasoningEffort)Color.White else Color(0xFF8A8A8A),style=MaterialTheme.typography.labelMedium)}}
+        Spacer(Modifier.height(14.dp))
+        Surface(shape=RoundedCornerShape(40.dp),color=Color(0xFF292929),border=androidx.compose.foundation.BorderStroke(1.dp,Color(0xFF4A4A4A))){Row(Modifier.fillMaxWidth().padding(12.dp),horizontalArrangement=Arrangement.SpaceBetween){values.forEach{value->Box(Modifier.size(46.dp).clip(CircleShape).background(if(value==ui.reasoningEffort)Accent else Color.Transparent).clickable{onSelect(value)},contentAlignment=Alignment.Center){Box(Modifier.size(if(value==ui.reasoningEffort)18.dp else 12.dp).clip(CircleShape).background(if(value==ui.reasoningEffort)Color.White else Color(0xFF6C6C6C)))}}}}
+    }
 }
 
-@Composable private fun ReasoningSheet(ui:AppUiState,onDismiss:()->Unit,onSelect:(String)->Unit){
-    ModalBottomSheet(onDismissRequest=onDismiss,containerColor=Color(0xFF202020)){
-        Text("Интеллект",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.align(Alignment.CenterHorizontally).padding(vertical=10.dp))
-        ReasoningChoices(ui,onSelect)
-        TextButton(onClick=onDismiss,modifier=Modifier.align(Alignment.End).padding(16.dp)){Text("Готово")}
-        Spacer(Modifier.navigationBarsPadding())
+@Composable private fun ReasoningPopup(ui:AppUiState,onDismiss:()->Unit,onSelect:(String)->Unit){
+    val values=(if(ui.selectedModel==MODEL_ULTRA)listOf("high","medium","none") else listOf("high","low","none"))
+    Dialog(onDismissRequest=onDismiss){
+        Box(Modifier.fillMaxSize(),contentAlignment=Alignment.TopCenter){
+            Text("Интеллект",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=28.dp))
+            Row(Modifier.align(Alignment.Center).padding(horizontal=16.dp),verticalAlignment=Alignment.CenterVertically){
+                Column(horizontalAlignment=Alignment.End,verticalArrangement=Arrangement.spacedBy(30.dp)){values.forEach{Text(reasoningLabel(it),style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.SemiBold)}}
+                Spacer(Modifier.width(20.dp))
+                Surface(shape=RoundedCornerShape(40.dp),color=Color(0xFF3A3A3A)){Column(Modifier.padding(horizontal=17.dp,vertical=20.dp),verticalArrangement=Arrangement.spacedBy(30.dp)){values.forEach{value->Box(Modifier.size(22.dp).clip(CircleShape).background(if(value==ui.reasoningEffort)Accent else Color.White).clickable{onSelect(value)})}}}
+            }
+            FilledIconButton(onClick=onDismiss,modifier=Modifier.align(Alignment.BottomEnd).padding(bottom=38.dp,end=8.dp),colors=IconButtonDefaults.filledIconButtonColors(containerColor=Color(0xFF3A3A3A))){Icon(Icons.Default.Close,"Закрыть")}
+        }
     }
 }
 
@@ -323,7 +335,7 @@ private fun HistoryDrawer(ui: AppUiState, vm: AgentViewModel) {
         Spacer(Modifier.statusBarsPadding())
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("ForgeFlow", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            IconButton(onClick = { vm.newChat() }) { Icon(Icons.Default.Add, "Новый чат") }
+            IconButton(onClick = { vm.newChat() }) { Icon(painterResource(app.forgeflow.agent.R.drawable.ic_square_pen), "Новый чат") }
         }
         HorizontalDivider()
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -342,28 +354,31 @@ private fun HistoryDrawer(ui: AppUiState, vm: AgentViewModel) {
                 )
             }
         }
-        Text("Nemotron 3 Super · локальная история", modifier = Modifier.padding(18.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        NavigationDrawerItem(selected=false,onClick={vm.openSettings(true)},icon={Icon(Icons.Default.Settings,null)},label={Text("Настройки")},modifier=Modifier.padding(horizontal=8.dp))
+        Text("Nemotron 3 · локальная история", modifier = Modifier.padding(horizontal=18.dp,vertical=8.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.navigationBarsPadding())
     }
 }
 
 @Composable
-private fun BackendSettings(initialUrl: String, initialToken: String, error: String?, onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
+private fun BackendSettings(initialUrl: String, initialToken: String, initialPrompt:String, error: String?, onDismiss: () -> Unit, onSave: (String, String, String) -> Unit) {
     var url by remember(initialUrl) { mutableStateOf(initialUrl) }
     var token by remember(initialToken) { mutableStateOf(initialToken) }
+    var systemPrompt by remember(initialPrompt) { mutableStateOf(initialPrompt) }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Default.Key, null) },
-        title = { Text("WorkAI Backend") },
+        title = { Text("Настройки") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("NVIDIA и GitHub ключи хранятся на сервере. В приложение вводится только персональный токен устройства.", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(url, { url = it }, label = { Text("Backend URL") }, singleLine = true)
                 OutlinedTextField(token, { token = it }, label = { Text("WORKAI_DEVICE_TOKEN") }, singleLine = true)
+                OutlinedTextField(systemPrompt,{systemPrompt=it},label={Text("Пользовательский системный промпт")},minLines=3,maxLines=7,supportingText={Text("Добавляется к системным инструкциям каждого нового запроса")})
                 AnimatedVisibility(error != null) { Text(error.orEmpty(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(url, token) }, enabled = url.isNotBlank() && token.length >= 20) { Text("Сохранить") } },
+        confirmButton = { TextButton(onClick = { onSave(url, token,systemPrompt) }, enabled = url.isNotBlank() && token.length >= 20) { Text("Сохранить") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } }
     )
 }

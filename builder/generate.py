@@ -11,9 +11,12 @@ def fetch_attachments():
     token, repo = os.environ.get("GH_TOKEN", ""), os.environ.get("GITHUB_REPOSITORY", "")
     for item in items:
         name = Path(str(item.get("name") or "file.bin")).name
-        req = urllib.request.Request(f"https://api.github.com/repos/{repo}/git/blobs/{item['sha']}", headers={"Authorization":f"Bearer {token}","Accept":"application/vnd.github+json","User-Agent":"WorkAI-Builder"})
-        with urllib.request.urlopen(req, timeout=120) as response: payload=json.load(response)
-        (INPUT/name).write_bytes(base64.b64decode(payload["content"]))
+        chunks = item.get("chunks") or ([item["sha"]] if item.get("sha") else [])
+        with (INPUT/name).open("wb") as output:
+            for sha in chunks:
+                req = urllib.request.Request(f"https://api.github.com/repos/{repo}/git/blobs/{sha}", headers={"Authorization":f"Bearer {token}","Accept":"application/vnd.github+json","User-Agent":"WorkAI-Builder"})
+                with urllib.request.urlopen(req, timeout=120) as response: payload=json.load(response)
+                output.write(base64.b64decode(payload["content"]))
 
 def call_ai(system, user, max_tokens=6000):
     payload = json.dumps({"model": MODEL, "messages": [{"role":"system","content":system},{"role":"user","content":user}], "temperature":0.35, "max_tokens":max_tokens, "stream":False}).encode()

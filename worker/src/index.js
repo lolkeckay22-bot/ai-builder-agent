@@ -124,15 +124,9 @@ async function startJob(request, env, url) {
   for (const item of (Array.isArray(body.attachments) ? body.attachments : []).slice(0, 8)) {
     const name = String(item?.name || "file.bin").replace(/[^\p{L}\p{N}._ -]/gu, "_").slice(0, 120);
     const mime = String(item?.mime || "application/octet-stream").slice(0, 120);
-    const base64 = String(item?.base64 || "");
-    if (!base64 || base64.length > 36_000_000) throw new Error(`invalid_attachment:${name}`);
-    const created = await github(env, "/git/blobs", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ content: base64, encoding: "base64" }),
-    });
-    if (!created.ok) throw new Error(`attachment_upload_failed:${name}:${created.status}`);
-    attachments.push({ name, mime, sha: (await created.json()).sha });
+    const chunks = Array.isArray(item?.chunks) ? item.chunks.map(String).filter(Boolean).slice(0, 24) : [];
+    if (!chunks.length) throw new Error(`invalid_attachment:${name}`);
+    attachments.push({ name, mime, chunks, size: Number(item?.size || 0) });
   }
   const dispatch = await github(env, "/dispatches", {
     method: "POST",
@@ -218,9 +212,17 @@ export default {
         const body = await request.json();
         const model = ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL;
         const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
-        const system = { role: "system", content: `Ты WorkAI — мобильный AI-агент. Используй Markdown: **жирный текст**, списки и тройные backticks для кода. Если приложен разбор MTZ, анализируй структуру темы, manifest, XML и ресурсы как специалист по HyperOS/MIUI. Доступные навыки: Android/Jetpack Compose, Gradle, APK build/debug, MTZ/ZIP-анализ, XML/JSON, редактирование архивов, проверка результата. Не раскрывай внутренний chain-of-thought; давай только вывод и краткие понятные этапы. Текущая модель: ${model}.` };
+        const custom = String(body.system_prompt || "").trim().slice(0, 8000);
+        const system = { role: "system", content: `Ты WorkAI — мобильный AI-агент. Используй Markdown: **жирный текст**, списки и тройные backticks для кода. Если приложен разбор MTZ, анализируй структуру темы, manifest, XML и ресурсы как специалист по HyperOS/MIUI. Доступные навыки: Android/Jetpack Compose, Gradle, APK build/debug, MTZ/ZIP-анализ, XML/JSON, редактирование архивов, проверка результата. Не раскрывай внутренний chain-of-thought; давай только вывод и краткие понятные этапы. Текущая модель: ${model}.${custom ? `\n\nПользовательские инструкции:\n${custom}` : ""}` };
         const upstream = await nvidiaStream(env, [system, ...messages], model, String(body.reasoning_effort || ""));
         return new Response(upstream.body, { status: 200, headers: { ...cors(request), "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "x-accel-buffering": "no" } });
+      }
+      if (url.pathname === "/v1/uploads/blob" && request.method === "POST") {
+        const body = await request.json(); const base64 = String(body.base64 || "");
+        if (!base64 || base64.length > 8_000_000) return json({ error: "invalid_chunk" }, 400, cors(request));
+        const created = await github(env, "/git/blobs", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({content:base64,encoding:"base64"}) });
+        if(!created.ok) return json({error:"chunk_upload_failed",detail:(await created.text()).slice(0,300)},502,cors(request));
+        return json({sha:(await created.json()).sha},201,cors(request));
       }
       if (url.pathname === "/v1/jobs" && request.method === "POST") return await startJob(request, env, url);
       const match = url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)(\/download)?$/);
