@@ -1,7 +1,7 @@
 name: Android build
 on:
   push:
-    branches: [main, codex/workai-fixes]
+    branches: [main, "codex/**"]
   workflow_dispatch:
 
 permissions:
