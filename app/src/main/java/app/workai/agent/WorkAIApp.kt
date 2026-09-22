@@ -1,10 +1,14 @@
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 
-package app.forgeflow.agent
+package app.workai.agent
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -52,7 +56,7 @@ import kotlinx.coroutines.launch
 private val Accent = Color(0xFF0A84FF)
 
 @Composable
-fun ForgeFlowApp(vm: AgentViewModel = viewModel()) {
+fun WorkAIApp(vm: AgentViewModel = viewModel()) {
     val ui by vm.ui.collectAsState()
     val drawerState = rememberDrawerState(if (ui.drawerOpen) DrawerValue.Open else DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -84,7 +88,7 @@ private fun Workspace(ui: AppUiState, vm: AgentViewModel, openHistory: () -> Uni
             title = { Text(if(chat?.messages?.isNotEmpty()==true) if(chat.mode==WorkspaceMode.WORK) "Работа" else "Чат" else "Новый чат", style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold) },
             navigationIcon = { FilledIconButton(onClick = openDrawer, colors=IconButtonDefaults.filledIconButtonColors(containerColor=Color(0xFF242424))) { Icon(Icons.Default.Menu, "История") } },
             actions = {
-                IconButton(onClick = { vm.newChat(ui.mode) }) { Icon(painterResource(app.forgeflow.agent.R.drawable.ic_square_pen), "Новый чат") }
+                IconButton(onClick = { vm.newChat(ui.mode) }) { Icon(painterResource(app.workai.agent.R.drawable.ic_square_pen), "Новый чат") }
                 IconButton(onClick = { vm.openSettings(true) }) { Icon(Icons.Default.MoreVert, "Настройки") }
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
@@ -103,15 +107,33 @@ private fun Workspace(ui: AppUiState, vm: AgentViewModel, openHistory: () -> Uni
 
 @Composable
 private fun ModeSelector(mode: WorkspaceMode, onMode: (WorkspaceMode) -> Unit) {
-    SingleChoiceSegmentedButtonRow(Modifier.padding(horizontal = 74.dp, vertical = 6.dp).fillMaxWidth()) {
-        WorkspaceMode.entries.forEachIndexed { index, item ->
-            SegmentedButton(
-                selected = mode == item,
-                onClick = { onMode(item) },
-                shape = SegmentedButtonDefaults.itemShape(index, WorkspaceMode.entries.size),
-                label = { Text(if (item == WorkspaceMode.CHAT) "Чат" else "Работа") },
-                icon = {}
-            )
+    val bubbleOffset by animateDpAsState(
+        targetValue = if (mode == WorkspaceMode.CHAT) 0.dp else 124.dp,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "modeBubble"
+    )
+    Box(
+        Modifier.padding(vertical = 6.dp).width(250.dp).height(40.dp)
+            .clip(RoundedCornerShape(20.dp)).background(Color(0xFF101010))
+            .border(1.dp, Color(0xFF292929), RoundedCornerShape(20.dp))
+    ) {
+        Box(
+            Modifier.padding(1.dp).offset(x = bubbleOffset).width(124.dp).fillMaxHeight()
+                .clip(RoundedCornerShape(19.dp)).background(Color(0xFF1C1C1C))
+        )
+        Row(Modifier.fillMaxSize()) {
+            WorkspaceMode.entries.forEach { item ->
+                Box(
+                    Modifier.weight(1f).fillMaxHeight().clickable { onMode(item) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        if (item == WorkspaceMode.CHAT) "Чат" else "Работа",
+                        color = if (mode == item) Color.White else Color(0xFFE5E5E5),
+                        fontWeight = if (mode == item) FontWeight.SemiBold else FontWeight.Medium
+                    )
+                }
+            }
         }
     }
 }
@@ -334,8 +356,8 @@ private fun HistoryDrawer(ui: AppUiState, vm: AgentViewModel) {
     ModalDrawerSheet(modifier = Modifier.width(320.dp)) {
         Spacer(Modifier.statusBarsPadding())
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("ForgeFlow", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            IconButton(onClick = { vm.newChat() }) { Icon(painterResource(app.forgeflow.agent.R.drawable.ic_square_pen), "Новый чат") }
+            Text("WorkAI", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            IconButton(onClick = { vm.newChat() }) { Icon(painterResource(app.workai.agent.R.drawable.ic_square_pen), "Новый чат") }
         }
         HorizontalDivider()
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {

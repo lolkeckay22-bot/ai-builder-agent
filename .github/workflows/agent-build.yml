@@ -19,6 +19,9 @@ jobs:
       KIND: ${{ github.event.client_payload.kind }}
       PROMPT: ${{ github.event.client_payload.prompt }}
       ATTACHMENTS: ${{ toJson(github.event.client_payload.attachments) }}
+      MODEL: ${{ github.event.client_payload.model }}
+      REASONING_EFFORT: ${{ github.event.client_payload.reasoning_effort }}
+      USER_SYSTEM_PROMPT: ${{ github.event.client_payload.system_prompt }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Reading request

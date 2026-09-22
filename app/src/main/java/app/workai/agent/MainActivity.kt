@@ -1,4 +1,4 @@
-package app.forgeflow.agent
+package app.workai.agent
 
 import android.app.Application
 import android.content.ContentValues
@@ -32,9 +32,10 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 import java.io.ByteArrayOutputStream
 import android.util.Base64
+import java.security.MessageDigest
 
 class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); enableEdgeToEdge(); setContent { ForgeFlowApp() } }
+    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); enableEdgeToEdge(); setContent { WorkAIApp() } }
 }
 
 enum class WorkspaceMode { CHAT, WORK }
@@ -115,10 +116,23 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
     private suspend fun runChat(id:String){val chat=_ui.value.conversations.first{it.id==id};val a=JSONArray();chat.messages.takeLast(30).forEach{a.put(JSONObject().put("role",if(it.role==MessageRole.USER)"user" else "assistant").put("content",it.context?:it.text))};update(id){it.copy(messages=it.messages+ChatMessage(MessageRole.ASSISTANT,"",thinking=""))};streamApi(id,JSONObject().put("messages",a).put("model",_ui.value.selectedModel).put("reasoning_effort",_ui.value.reasoningEffort).put("system_prompt",_ui.value.systemPrompt))}
     private suspend fun streamApi(id:String,body:JSONObject)=withContext(Dispatchers.IO){val request=builder("/v1/chat/stream").post(body.toString().toRequestBody("application/json".toMediaType())).build();val call=client.newCall(request);calls[id]=call;call.execute().use{response->if(!response.isSuccessful)error("Backend ${response.code}");val source=response.body?.source()?:error("Пустой ответ");while(!source.exhausted()){val line=source.readUtf8Line()?:continue;if(!line.startsWith("data: "))continue;val data=line.removePrefix("data: ").trim();if(data=="[DONE]")break;val event=runCatching{JSONObject(data)}.getOrNull()?:continue;val delta=event.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta");val token=event.optString("token").ifEmpty{delta?.optString("content").orEmpty()};val reasoning=event.optString("reasoning").ifEmpty{delta?.optString("reasoning_content").orEmpty()};if(token.isEmpty()&&reasoning.isEmpty())continue;withContext(Dispatchers.Main){update(id,false){c->val list=c.messages.toMutableList();val index=list.indexOfLast{it.role==MessageRole.ASSISTANT};if(index>=0){val old=list[index];list[index]=old.copy(text=old.text+token,thinking=old.thinking.orEmpty()+reasoning)};c.copy(messages=list,updatedAt=System.currentTimeMillis())}}}}}
 
+    private fun sha256(bytes:ByteArray)=MessageDigest.getInstance("SHA-256").digest(bytes).joinToString(""){"%02x".format(it)}
+    private suspend fun uploadChunk(id:String,bytes:ByteArray,index:Int):JSONObject{
+        val digest=sha256(bytes)
+        var failure:Throwable?=null
+        repeat(4){attempt->
+            try{
+                val uploaded=api("/v1/uploads/blob","POST",JSONObject().put("base64",Base64.encodeToString(bytes,Base64.NO_WRAP)).put("sha256",digest).put("size",bytes.size).put("index",index),id)
+                if(uploaded.optString("sha256")!=digest||uploaded.optInt("size")!=bytes.size)error("Сервер не подтвердил целостность части ${index+1}")
+                return uploaded
+            }catch(e:Throwable){failure=e;if(attempt<3)delay(600L*(1 shl attempt))}
+        }
+        throw failure?:IllegalStateException("Не удалось загрузить часть ${index+1}")
+    }
     private suspend fun runWork(id:String,prompt:String,files:List<PendingAttachment>){
         val kind=when{prompt.contains("mtz",true)||prompt.contains("тема",true)->"mtz";prompt.contains("zip",true)||prompt.contains("архив",true)->"zip";else->"apk"}
-        val payloadFiles=JSONArray();files.forEach{file->val chunks=JSONArray();var offset=0;while(offset<file.bytes.size){val end=minOf(offset+5*1024*1024,file.bytes.size);val encoded=Base64.encodeToString(file.bytes.copyOfRange(offset,end),Base64.NO_WRAP);val uploaded=api("/v1/uploads/blob","POST",JSONObject().put("base64",encoded),id);chunks.put(uploaded.getString("sha"));offset=end};payloadFiles.put(JSONObject().put("name",file.name).put("mime",file.mime).put("chunks",chunks).put("size",file.bytes.size))}
-        val started=api("/v1/jobs","POST",JSONObject().put("prompt",prompt).put("kind",kind).put("attachments",payloadFiles),id);val job=started.getString("id");val t=started.optJSONArray("tasks")?:JSONArray();val todos=(0 until t.length()).map{WorkTodo(t.getString(it),if(it==0)TodoState.RUNNING else TodoState.WAITING)};update(id){it.copy(jobId=job,todos=todos)}
+        val payloadFiles=JSONArray();files.forEach{file->val chunks=JSONArray();var offset=0;var index=0;while(offset<file.bytes.size){val end=minOf(offset+5*1024*1024,file.bytes.size);val part=file.bytes.copyOfRange(offset,end);val uploaded=uploadChunk(id,part,index);chunks.put(JSONObject().put("sha",uploaded.getString("sha")).put("sha256",uploaded.getString("sha256")).put("size",part.size).put("index",index));offset=end;index++};payloadFiles.put(JSONObject().put("name",file.name).put("mime",file.mime).put("chunks",chunks).put("size",file.bytes.size).put("sha256",sha256(file.bytes)))}
+        val started=api("/v1/jobs","POST",JSONObject().put("prompt",prompt).put("kind",kind).put("attachments",payloadFiles).put("model",_ui.value.selectedModel).put("reasoning_effort",_ui.value.reasoningEffort).put("system_prompt",_ui.value.systemPrompt),id);val job=started.getString("id");val t=started.optJSONArray("tasks")?:JSONArray();val todos=(0 until t.length()).map{WorkTodo(t.getString(it),if(it==0)TodoState.RUNNING else TodoState.WAITING)};update(id){it.copy(jobId=job,todos=todos)}
         repeat(300){delay(5000);val s=api("/v1/jobs/$job","GET");val sa=s.optJSONArray("steps")?:JSONArray();if(sa.length()>0){val steps=(0 until sa.length()).map{i->val x=sa.getJSONObject(i);val st=when{x.optString("conclusion")=="success"->TodoState.DONE;x.optString("conclusion")=="failure"->TodoState.FAILED;x.optString("status")=="in_progress"->TodoState.RUNNING;else->TodoState.WAITING};WorkTodo(x.optString("title","Этап ${i+1}"),st)};update(id){it.copy(todos=steps)}};if(s.optString("status")=="completed"){if(s.optString("conclusion")!="success")error("Сборка завершилась с ошибкой");val a=s.optJSONObject("artifact")?:error("Artifact не найден");update(id){it.copy(artifact=WorkArtifact(job,a.getString("name"),a.optLong("size")),messages=it.messages+ChatMessage(MessageRole.ASSISTANT,"Готово. Файл собран и проверен."),updatedAt=System.currentTimeMillis())};return}}
         error("Превышено время ожидания сборки")
     }
