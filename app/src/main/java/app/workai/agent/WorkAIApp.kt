@@ -327,7 +327,7 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
         Text("Настройка",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.align(Alignment.CenterHorizontally).padding(vertical=8.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal=28.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.Center){
             Text("${modelShort(ui.selectedModel)} ${reasoningLabel(ui.reasoningEffort)}",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
-            Spacer(Modifier.width(6.dp));Icon(Icons.Default.ChevronRight,null,tint=Color(0xFFBDBDBD))
+            Spacer(Modifier.width(6.dp));Icon(Icons.Default.KeyboardArrowRight,null,tint=Color(0xFFBDBDBD))
         }
         IntelligenceSlider(ui,vm::selectReasoning)
         Text("Модель",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(start=28.dp,bottom=10.dp))
