@@ -111,11 +111,13 @@ async function researchContext(env, messages) {
   const blocks = [...directBlocks], activities = [...directActivities];
   for (const query of queries) {
     try {
-      const results = await webSearch(query); activities.push({label:`Поиск: ${query}`,icon:"search"}); blocks.push(`ПОИСК: ${query}\n${results.map((r,i)=>`[${i+1}] ${r.title}\n${r.url}\n${r.snippet}`).join("\n")}`);
+      activities.push({label:"Поиск в интернете…",icon:"search"});
+      const results = await webSearch(query); activities.push({label:`Поиск по запросу «${query}»`,icon:"search"}); blocks.push(`ПОИСК: ${query}\n${results.map((r,i)=>`[${i+1}] ${r.title}\n${r.url}\n${r.snippet}`).join("\n")}`);
       for (const result of results.slice(0, 2)) try { const page = await openWebPage(result.url); blocks.push(`ИСТОЧНИК: ${page.url}\n${page.text}`); } catch {}
     } catch {}
   }
-  if(blocks.length)activities.push({label:`Изучено источников: ${blocks.filter(x=>x.startsWith("ИСТОЧНИК:")).length}`,icon:"search"});
+  const sourceCount=blocks.filter(x=>x.startsWith("ИСТОЧНИК:")).length;
+  if(sourceCount>0)activities.push({label:`Изучено источников: ${sourceCount}`,icon:"search"});
   return { context:blocks.join("\n\n").slice(0, 50000), activities };
 }
 
@@ -183,11 +185,31 @@ async function nvidiaStream(env, messages, requestedModel, requestedEffort) {
 function withActivityEvents(upstream, activities) {
   const encoder=new TextEncoder(), reader=upstream.body.getReader();
   return new ReadableStream({async start(controller){
-    controller.enqueue(encoder.encode(`data: ${JSON.stringify({workai_stage:{text:"Проверяю запрос.",thinking:"Определяю, нужны ли актуальные данные или дополнительные источники."}})}\n\n`));
-    for(const activity of activities)controller.enqueue(encoder.encode(`data: ${JSON.stringify({workai_activity:activity})}\n\n`));
-    if(activities.length)controller.enqueue(encoder.encode(`data: ${JSON.stringify({workai_stage:{text:"Источники проверены. Формирую ответ.",thinking:"Сопоставляю найденные сведения и отделяю факты от выводов."}})}\n\n`));
-    controller.enqueue(encoder.encode(`data: ${JSON.stringify({workai_final_start:true})}\n\n`));
-    try{while(true){const {done,value}=await reader.read();if(done)break;controller.enqueue(value)}controller.close()}catch(error){controller.error(error)}
+    const send=value=>controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`));
+    for(const activity of activities)send({type:"status",text:activity.label,icon:activity.icon||"search"});
+    const decoder=new TextDecoder();let buffer="",completed=false;
+    try{
+      while(true){
+        const {done,value}=await reader.read();buffer+=decoder.decode(value||new Uint8Array(),{stream:!done});
+        const frames=buffer.split(/\r?\n\r?\n/);buffer=frames.pop()||"";
+        for(const frame of frames){
+          for(const line of frame.split(/\r?\n/)){
+            if(!line.startsWith("data:"))continue;const raw=line.slice(5).trim();
+            if(raw==="[DONE]"){completed=true;continue}
+            let packet;try{packet=JSON.parse(raw)}catch{continue}
+            const choice=packet.choices?.[0]||{},delta=choice.delta||{};
+            const thinking=delta.reasoning_content||delta.reasoning||delta.thinking||"";
+            const text=delta.content||packet.token||"";
+            if(thinking)send({type:"thinking_delta",delta:String(thinking)});
+            if(text)send({type:"text_delta",delta:String(text)});
+            if(choice.finish_reason)completed=true;
+          }
+        }
+        if(done)break;
+      }
+      if(!completed)throw new Error("provider_stream_ended_without_completion");
+      send({type:"done"});controller.close();
+    }catch(error){send({type:"error",message:String(error?.message||error)});controller.close()}
   }});
 }
 

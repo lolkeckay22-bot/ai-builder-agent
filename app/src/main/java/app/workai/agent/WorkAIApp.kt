@@ -147,7 +147,7 @@ private fun ConversationBody(
     onShare: (WorkArtifact) -> Unit
 ) {
     val listState = rememberLazyListState()
-    val count = chat.messages.size + if (chat.todos.isNotEmpty()) 1 else 0
+    val count = chat.messages.size
     LaunchedEffect(count, running) { if (count > 0) listState.animateScrollToItem(count - 1) }
     LazyColumn(
         state = listState,
@@ -156,11 +156,7 @@ private fun ConversationBody(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         if (chat.messages.isEmpty()) item { EmptyState(chat.mode) }
-        items(chat.messages) { MessageBubble(it) }
-        if (chat.mode == WorkspaceMode.WORK && chat.todos.isNotEmpty()) item { TodoCard(chat.todos) }
-        chat.artifact?.let { artifact ->
-            item { ArtifactCard(artifact, onDownload = { onDownload(artifact) }, onShare = { onShare(artifact) }) }
-        }
+        items(chat.messages, key={it.createdAt}) { message -> MessageBubble(message,onDownload,onShare) }
         if (running && chat.messages.lastOrNull()?.role != MessageRole.ASSISTANT) item { TypingIndicator() }
     }
 }
@@ -178,39 +174,42 @@ private fun EmptyState(mode: WorkspaceMode) {
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage) {
+private fun MessageBubble(message: ChatMessage,onDownload:(WorkArtifact)->Unit,onShare:(WorkArtifact)->Unit) {
     val user = message.role == MessageRole.USER
     val clipboard = LocalClipboardManager.current
-    var thinkingOpen by remember(message.createdAt) { mutableStateOf(message.text.isBlank()) }
+    val context = LocalContext.current
+    var thinkingOpen by remember(message.createdAt) { mutableStateOf(message.execution?.state==ExecutionState.RUNNING) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (user) Alignment.End else Alignment.Start) {
-        if (!user && message.thinking != null && (message.text.isBlank() || message.thinking.isNotBlank())) {
+        val session=message.execution
+        if (!user && session != null) {
             Surface(onClick = { thinkingOpen = !thinkingOpen }, color = Color.Transparent, shape = RoundedCornerShape(12.dp)) {
-                Row(Modifier.padding(horizontal = 4.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (message.text.isBlank() && message.thinking.isNullOrBlank()) { Box(Modifier.size(15.dp).clip(CircleShape).background(Accent)); Spacer(Modifier.width(8.dp)) }
-                    Text("Размышление", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(Modifier.padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if(session.state==ExecutionState.RUNNING){Box(Modifier.size(13.dp).clip(CircleShape).background(Accent));Spacer(Modifier.width(8.dp))}
+                    val elapsed=((session.completedAt?:System.currentTimeMillis())-session.startedAt).coerceAtLeast(0)/1000
+                    Text(if(session.state==ExecutionState.RUNNING)"Размышление" else "Обработка заняла ${elapsed/60}m ${elapsed%60}s", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Icon(if (thinkingOpen) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(18.dp))
                 }
             }
-            AnimatedVisibility(thinkingOpen && message.thinking.isNotBlank()) {
-                Row(Modifier.padding(start=4.dp,bottom=8.dp)){
-                    Box(Modifier.width(2.dp).fillMaxHeight().background(Color(0xFF3A3A3A)))
-                    Text(message.thinking.orEmpty(), modifier = Modifier.padding(start = 14.dp), style = MaterialTheme.typography.bodyMedium, color = Color(0xFFB7B7B7))
+            AnimatedVisibility(thinkingOpen) {
+                Column(Modifier.padding(start=4.dp,bottom=6.dp),verticalArrangement=Arrangement.spacedBy(7.dp)){
+                    session.events.filter{it.type==ExecutionEventType.THINKING}.forEach{event->
+                        Text(event.text, modifier=Modifier.padding(start=14.dp),style=MaterialTheme.typography.bodySmall,color=Color(0xFF9D9D9D))
+                    }
                 }
             }
+            Column(Modifier.padding(start=4.dp,bottom=8.dp),verticalArrangement=Arrangement.spacedBy(7.dp)){
+                session.events.filter{it.type!=ExecutionEventType.THINKING}.forEach{event->when(event.type){
+                    ExecutionEventType.TEXT->MarkdownText(event.text,Modifier.padding(vertical=2.dp))
+                    else->Row(verticalAlignment=Alignment.CenterVertically){Icon(when(event.icon){"search"->Icons.Default.Language;"file"->Icons.Default.FolderOpen;"error"->Icons.Default.Error;else->Icons.Default.Terminal},null,Modifier.size(19.dp),tint=if(event.type==ExecutionEventType.ERROR)MaterialTheme.colorScheme.error else Color(0xFFA4A4A4));Spacer(Modifier.width(9.dp));Text(event.text,color=Color(0xFFA4A4A4),style=MaterialTheme.typography.bodyMedium)}
+                }}
+            }
         }
-        if(!user && message.activities.isNotEmpty()) Column(Modifier.padding(start=4.dp,bottom=10.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
-            message.activities.forEach{activity->Row(verticalAlignment=Alignment.CenterVertically){Icon(when(activity.icon){"file"->Icons.Default.FolderOpen;"build"->Icons.Default.Terminal;else->Icons.Default.Language},null,Modifier.size(21.dp),tint=if(activity.icon=="search")Color(0xFF76B900) else Color(0xFFB0B0B0));Spacer(Modifier.width(10.dp));Text(activity.label,color=Color(0xFFB8B8B8),style=MaterialTheme.typography.bodyMedium)}}
-        }
-        if(message.text.isNotBlank()) IconButton(
-            onClick = { clipboard.setText(AnnotatedString(message.text)) },
-            modifier = Modifier.size(30.dp)
-        ) { Icon(Icons.Default.ContentCopy, "Копировать", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (message.attachments.isNotEmpty()) Column(Modifier.widthIn(max = 340.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             message.attachments.forEach { file ->
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(14.dp)) {
                     Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Surface(shape = RoundedCornerShape(10.dp), color = Accent.copy(alpha=.14f)) { Icon(if(file.name.endsWith(".mtz",true)) Icons.Default.Palette else Icons.Default.InsertDriveFile, null, tint=Accent, modifier=Modifier.padding(9.dp).size(20.dp)) }
-                        Spacer(Modifier.width(10.dp));Column { Text(file.name, fontWeight=FontWeight.Medium, maxLines=1, overflow=TextOverflow.Ellipsis);Text(if(file.name.endsWith(".mtz",true)) "Тема HyperOS · содержимое проанализировано" else file.mime, style=MaterialTheme.typography.labelSmall, color=MaterialTheme.colorScheme.onSurfaceVariant) }
+                        Spacer(Modifier.width(10.dp));Text(file.name, fontWeight=FontWeight.Medium, maxLines=1, overflow=TextOverflow.Ellipsis)
                     }
                 }
             }
@@ -224,6 +223,11 @@ private fun MessageBubble(message: ChatMessage) {
             if(user) Text(message.text,Modifier.padding(horizontal=14.dp,vertical=10.dp),style=MaterialTheme.typography.bodyLarge)
             else MarkdownText(message.text, Modifier.padding(4.dp))
         }
+        message.artifact?.let{artifact->if(!user){Spacer(Modifier.height(8.dp));ArtifactCard(artifact,onDownload={onDownload(artifact)},onShare={onShare(artifact)})}}
+        if(!user&&message.text.isNotBlank()&&session?.state!=ExecutionState.RUNNING){Row(Modifier.padding(top=4.dp),horizontalArrangement=Arrangement.spacedBy(4.dp)){
+            IconButton(onClick={clipboard.setText(AnnotatedString(message.text))},modifier=Modifier.size(34.dp)){Icon(Icons.Default.ContentCopy,"Copy",Modifier.size(18.dp),tint=MaterialTheme.colorScheme.onSurfaceVariant)}
+            IconButton(onClick={val intent=android.content.Intent(android.content.Intent.ACTION_SEND).apply{type="text/plain";putExtra(android.content.Intent.EXTRA_TEXT,message.text)};context.startActivity(android.content.Intent.createChooser(intent,"Поделиться ответом"))},modifier=Modifier.size(34.dp)){Icon(Icons.Default.Share,"Share",Modifier.size(18.dp),tint=MaterialTheme.colorScheme.onSurfaceVariant)}
+        }}
     }
 }
 
