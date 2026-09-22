@@ -305,14 +305,9 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
                     androidx.compose.foundation.text.BasicTextField(value=ui.input,onValueChange=vm::setInput,modifier=Modifier.fillMaxWidth().heightIn(min=42.dp,max=130.dp).padding(horizontal=10.dp,vertical=10.dp),textStyle=MaterialTheme.typography.bodyLarge.copy(color=Color.White),cursorBrush=androidx.compose.ui.graphics.SolidColor(Accent),decorationBox={inner->Box{if(ui.input.isEmpty())Text(if(ui.mode==WorkspaceMode.CHAT)"Сообщение…" else "Опишите задачу…",color=Color(0xFF9B9B9B));inner()}})
                     Row(verticalAlignment=Alignment.CenterVertically){
                         IconButton(onClick={picker.launch("*/*")},modifier=Modifier.size(42.dp)){Icon(Icons.Default.Add,"Добавить файл")}
-                        Column(
-                            Modifier.clip(RoundedCornerShape(12.dp)).clickable{modelsOpen=true}.padding(horizontal=8.dp,vertical=3.dp)
-                        ){
-                            Row(verticalAlignment=Alignment.CenterVertically){
-                                Text("${modelShort(ui.selectedModel)} · ${reasoningLabel(ui.reasoningEffort)}",color=Color.White,fontWeight=FontWeight.SemiBold,style=MaterialTheme.typography.bodyMedium)
-                                Icon(Icons.Default.KeyboardArrowDown,null,Modifier.size(17.dp),tint=Accent)
-                            }
-                            Text("Уровень размышлений",color=Color(0xFF9B9B9B),style=MaterialTheme.typography.labelSmall)
+                        Row(Modifier.clip(RoundedCornerShape(12.dp)).clickable{reasoningOpen=true}.padding(horizontal=8.dp,vertical=10.dp),verticalAlignment=Alignment.CenterVertically){
+                            Text("${modelShort(ui.selectedModel)} ${reasoningLabel(ui.reasoningEffort)}",color=Color.White,fontWeight=FontWeight.SemiBold,style=MaterialTheme.typography.bodyMedium)
+                            Icon(Icons.Default.KeyboardArrowDown,null,Modifier.size(17.dp),tint=Accent)
                         }
                         Spacer(Modifier.weight(1f))
                         val canSend=running||ui.input.isNotBlank()||ui.attachments.isNotEmpty()
@@ -322,7 +317,7 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
             }
         }
     }
-    if(reasoningOpen) ReasoningPopup(ui,onDismiss={reasoningOpen=false},onSelect={vm.selectReasoning(it)})
+    if(reasoningOpen) ReasoningPopup(ui,onDismiss={reasoningOpen=false},onModels={reasoningOpen=false;modelsOpen=true},onSelect={vm.selectReasoning(it)})
     if(modelsOpen) ModalBottomSheet(onDismissRequest={modelsOpen=false},containerColor=Color(0xFF202020)){
         Text("Настройка",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.align(Alignment.CenterHorizontally).padding(vertical=8.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal=28.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.Center){
@@ -357,18 +352,14 @@ private fun reasoningLabel(value:String)=when(value){"none"->"Без размы�
     }
 }
 
-@Composable private fun ReasoningPopup(ui:AppUiState,onDismiss:()->Unit,onSelect:(String)->Unit){
-    val values=(if(ui.selectedModel==MODEL_ULTRA)listOf("high","medium","none") else if(ui.selectedModel.startsWith("agnes-"))listOf("high","medium","low","none") else listOf("high","low","none"))
-    Dialog(onDismissRequest=onDismiss){
-        Box(Modifier.fillMaxSize(),contentAlignment=Alignment.TopCenter){
-            Text("Интеллект",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=28.dp))
-            Row(Modifier.align(Alignment.Center).padding(horizontal=16.dp),verticalAlignment=Alignment.CenterVertically){
-                Column(horizontalAlignment=Alignment.End,verticalArrangement=Arrangement.spacedBy(30.dp)){values.forEach{Text(reasoningLabel(it),style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.SemiBold)}}
-                Spacer(Modifier.width(20.dp))
-                Surface(shape=RoundedCornerShape(40.dp),color=Color(0xFF3A3A3A)){Column(Modifier.padding(horizontal=17.dp,vertical=20.dp),verticalArrangement=Arrangement.spacedBy(30.dp)){values.forEach{value->Box(Modifier.size(22.dp).clip(CircleShape).background(if(value==ui.reasoningEffort)Accent else Color.White).clickable{onSelect(value)})}}}
-            }
-            FilledIconButton(onClick=onDismiss,modifier=Modifier.align(Alignment.BottomEnd).padding(bottom=38.dp,end=8.dp),colors=IconButtonDefaults.filledIconButtonColors(containerColor=Color(0xFF3A3A3A))){Icon(Icons.Default.Close,"Закрыть")}
+@Composable private fun ReasoningPopup(ui:AppUiState,onDismiss:()->Unit,onModels:()->Unit,onSelect:(String)->Unit){
+    ModalBottomSheet(onDismissRequest=onDismiss,containerColor=Color(0xFF202020),scrimColor=Color.Black.copy(alpha=.78f)){
+        Row(Modifier.fillMaxWidth().clickable(onClick=onModels).padding(vertical=14.dp),horizontalArrangement=Arrangement.Center,verticalAlignment=Alignment.CenterVertically){
+            Text("${modelShort(ui.selectedModel)} ${reasoningLabel(ui.reasoningEffort)}",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
+            Spacer(Modifier.width(8.dp));Icon(Icons.Default.KeyboardArrowRight,null,tint=Color(0xFFBDBDBD))
         }
+        IntelligenceSlider(ui,onSelect)
+        Spacer(Modifier.navigationBarsPadding().height(18.dp))
     }
 }
 
