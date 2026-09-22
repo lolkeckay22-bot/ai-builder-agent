@@ -61,6 +61,24 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
   throw new Error(`NVIDIA ${lastStatus || "network"}: ${lastText.slice(0, 300)}`);
 }
 
+async function nvidiaStream(env, messages, requestedModel) {
+  const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : (env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b");
+  let lastText = "";
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "authorization": `Bearer ${env.NVIDIA_API_KEY}`, "content-type": "application/json", "accept": "text/event-stream" },
+      body: JSON.stringify({ model, messages, temperature: 0.45, max_tokens: 4096, stream: true }),
+    });
+    if (response.ok) return response;
+    lastText = await response.text();
+    if (![408,429,500,502,503,504].includes(response.status)) throw new Error(`NVIDIA ${response.status}: ${lastText.slice(0,300)}`);
+    const wait = Number(response.headers.get("retry-after"));
+    await sleep(Math.min(wait > 0 ? wait * 1000 : 700 * (2 ** attempt) + Math.random() * 350, 9000));
+  }
+  throw new Error(`NVIDIA overloaded: ${lastText.slice(0,300)}`);
+}
+
 async function github(env, path, init = {}) {
   const response = await fetch(`https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}${path}`, {
     ...init,
@@ -179,6 +197,14 @@ export default {
         const model = ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL;
         const answer = await nvidia(env, [{ role: "system", content: `Ты WorkAI, точный русскоязычный ассистент. Текущая модель: ${model}. Если тебя спрашивают о модели, назови именно её.` }, ...messages], 2048, 0.45, model);
         return json({ answer, model }, 200, cors(request));
+      }
+      if (url.pathname === "/v1/chat/stream" && request.method === "POST") {
+        const body = await request.json();
+        const model = ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL;
+        const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
+        const system = { role: "system", content: `Ты WorkAI — мобильный AI-агент. Используй Markdown: **жирный текст**, списки и тройные backticks для кода. Если приложен разбор MTZ, анализируй структуру темы, manifest, XML и ресурсы как специалист по HyperOS/MIUI. Доступные навыки: Android/Jetpack Compose, Gradle, APK build/debug, MTZ/ZIP-анализ, XML/JSON, редактирование архивов, проверка результата. Не раскрывай внутренний chain-of-thought; давай только вывод и краткие понятные этапы. Текущая модель: ${model}.` };
+        const upstream = await nvidiaStream(env, [system, ...messages], model);
+        return new Response(upstream.body, { status: 200, headers: { ...cors(request), "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "x-accel-buffering": "no" } });
       }
       if (url.pathname === "/v1/jobs" && request.method === "POST") return await startJob(request, env, url);
       const match = url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)(\/download)?$/);
