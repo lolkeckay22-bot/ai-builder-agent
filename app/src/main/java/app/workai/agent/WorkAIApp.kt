@@ -112,7 +112,7 @@ private fun ModeSelector(mode: WorkspaceMode, onMode: (WorkspaceMode) -> Unit) {
         animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
         label = "modeBubble"
     )
-    Box(
+    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.Center){ Box(
         Modifier.padding(vertical = 6.dp).width(250.dp).height(40.dp)
             .clip(RoundedCornerShape(20.dp)).background(Color(0xFF101010))
             .border(1.dp, Color(0xFF292929), RoundedCornerShape(20.dp))
@@ -135,7 +135,7 @@ private fun ModeSelector(mode: WorkspaceMode, onMode: (WorkspaceMode) -> Unit) {
                 }
             }
         }
-    }
+    } }
 }
 
 @Composable
@@ -198,6 +198,9 @@ private fun MessageBubble(message: ChatMessage) {
                 }
             }
         }
+        if(!user && message.activities.isNotEmpty()) Column(Modifier.padding(start=4.dp,bottom=10.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
+            message.activities.forEach{activity->Row(verticalAlignment=Alignment.CenterVertically){Icon(when(activity.icon){"file"->Icons.Default.FolderOpen;"build"->Icons.Default.Terminal;else->Icons.Default.Language},null,Modifier.size(21.dp),tint=if(activity.icon=="search")Color(0xFF76B900) else Color(0xFFB0B0B0));Spacer(Modifier.width(10.dp));Text(activity.label,color=Color(0xFFB8B8B8),style=MaterialTheme.typography.bodyMedium)}}
+        }
         if(message.text.isNotBlank()) IconButton(
             onClick = { clipboard.setText(AnnotatedString(message.text)) },
             modifier = Modifier.size(30.dp)
@@ -218,7 +221,8 @@ private fun MessageBubble(message: ChatMessage) {
             color = if (user) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
             modifier = Modifier.widthIn(max = 340.dp).animateContentSize()
         ) {
-            MarkdownText(message.text, Modifier.padding(if (user) 14.dp else 4.dp))
+            if(user) Text(message.text,Modifier.padding(horizontal=14.dp,vertical=10.dp),style=MaterialTheme.typography.bodyLarge)
+            else MarkdownText(message.text, Modifier.padding(4.dp))
         }
     }
 }
@@ -302,7 +306,7 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
                     Row(verticalAlignment=Alignment.CenterVertically){
                         IconButton(onClick={picker.launch("*/*")},modifier=Modifier.size(42.dp)){Icon(Icons.Default.Add,"Добавить файл")}
                         AssistChip(onClick={reasoningOpen=true},label={Text(reasoningLabel(ui.reasoningEffort))},leadingIcon={Icon(Icons.Default.Psychology,null,Modifier.size(17.dp))},colors=AssistChipDefaults.assistChipColors(labelColor=if(ui.reasoningEffort=="none")Color.White else Accent,leadingIconContentColor=if(ui.reasoningEffort=="none")Color.White else Accent))
-                        TextButton(onClick={modelsOpen=true},contentPadding=PaddingValues(horizontal=8.dp)){Text(if(ui.selectedModel==MODEL_ULTRA)"Ultra" else "Super",color=Color.White);Icon(Icons.Default.KeyboardArrowDown,null,Modifier.size(17.dp))}
+                        TextButton(onClick={modelsOpen=true},contentPadding=PaddingValues(horizontal=8.dp)){Text(modelShort(ui.selectedModel),color=Color.White);Icon(Icons.Default.KeyboardArrowDown,null,Modifier.size(17.dp))}
                         Spacer(Modifier.weight(1f))
                         val canSend=running||ui.input.isNotBlank()||ui.attachments.isNotEmpty()
                         Surface(shape=CircleShape,color=if(canSend)Accent else Color(0xFF3B3B3B),modifier=Modifier.size(40.dp).pointerInput(canSend,running){detectTapGestures(onTap={if(canSend){if(running)vm.stop() else vm.send()}},onLongPress={if(!running)reasoningOpen=true})}){Box(contentAlignment=Alignment.Center){Icon(if(running)Icons.Default.Stop else Icons.Default.ArrowUpward,if(running)"Остановить" else "Отправить",tint=if(canSend)Color.White else Color(0xFF8A8A8A))}}
@@ -314,17 +318,27 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
     if(reasoningOpen) ReasoningPopup(ui,onDismiss={reasoningOpen=false},onSelect={vm.selectReasoning(it)})
     if(modelsOpen) ModalBottomSheet(onDismissRequest={modelsOpen=false},containerColor=Color(0xFF202020)){
         Text("Настройка",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.align(Alignment.CenterHorizontally).padding(vertical=8.dp))
-        TextButton(onClick={vm.selectModel(if(ui.selectedModel==MODEL_SUPER)MODEL_ULTRA else MODEL_SUPER)},modifier=Modifier.align(Alignment.CenterHorizontally)){Text((if(ui.selectedModel==MODEL_ULTRA)"Nemotron Ultra 550B" else "Nemotron Super 120B")+"  "+reasoningLabel(ui.reasoningEffort),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold,color=Color.White);Icon(Icons.Default.ChevronRight,null)}
+        Column(Modifier.padding(horizontal=20.dp).clip(RoundedCornerShape(24.dp)).background(Color(0xFF414141))){
+            listOf(MODEL_SUPER,MODEL_ULTRA,MODEL_AGNES_25,MODEL_AGNES_30).forEach{model->
+                ModelRow(modelTitle(model),modelSubtitle(model),ui.selectedModel==model){vm.selectModel(model)}
+                if(model!=MODEL_AGNES_30)HorizontalDivider(color=Color(0xFF252525))
+            }
+        }
+        Text("Интеллект",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(start=28.dp,top=22.dp))
         IntelligenceSlider(ui,vm::selectReasoning)
-        Text("Нажмите название для смены модели",color=Color(0xFF9A9A9A),style=MaterialTheme.typography.bodySmall,modifier=Modifier.align(Alignment.CenterHorizontally).padding(top=12.dp))
+        Button(onClick={modelsOpen=false},modifier=Modifier.fillMaxWidth().padding(horizontal=28.dp),colors=ButtonDefaults.buttonColors(containerColor=Color.White,contentColor=Color.Black)){Text("Готово",fontWeight=FontWeight.Bold)}
         Spacer(Modifier.navigationBarsPadding().height(16.dp))
     }
 }
 
+private fun modelShort(model:String)=when(model){MODEL_ULTRA->"Ultra";MODEL_AGNES_25->"Agnes 2.5";MODEL_AGNES_30->"Agnes 3.0";else->"Super"}
+private fun modelTitle(model:String)=when(model){MODEL_ULTRA->"Nemotron Ultra 550B";MODEL_AGNES_25->"Agnes 2.5 Flash";MODEL_AGNES_30->"Agnes 3.0 Flash";else->"Nemotron Super 120B"}
+private fun modelSubtitle(model:String)=when(model){MODEL_ULTRA->"Максимальное качество NVIDIA";MODEL_AGNES_25->"Быстрая агентная модель · 512K";MODEL_AGNES_30->"Новая модель Agnes · доступ зависит от API";else->"Быстро и экономно"}
+
 private fun reasoningLabel(value:String)=when(value){"none"->"Без размышления";"low"->"Низкий";"medium"->"Средний";else->"Высокий"}
 
 @Composable private fun IntelligenceSlider(ui:AppUiState,onSelect:(String)->Unit){
-    val values=if(ui.selectedModel==MODEL_ULTRA)listOf("none","medium","high") else listOf("none","low","high")
+    val values=if(ui.selectedModel==MODEL_ULTRA)listOf("none","medium","high") else if(ui.selectedModel.startsWith("agnes-"))listOf("none","low","medium","high") else listOf("none","low","high")
     Column(Modifier.padding(horizontal=28.dp,vertical=18.dp)){
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){values.forEach{Text(reasoningLabel(it),color=if(it==ui.reasoningEffort)Color.White else Color(0xFF8A8A8A),style=MaterialTheme.typography.labelMedium)}}
         Spacer(Modifier.height(14.dp))
@@ -333,7 +347,7 @@ private fun reasoningLabel(value:String)=when(value){"none"->"Без размы�
 }
 
 @Composable private fun ReasoningPopup(ui:AppUiState,onDismiss:()->Unit,onSelect:(String)->Unit){
-    val values=(if(ui.selectedModel==MODEL_ULTRA)listOf("high","medium","none") else listOf("high","low","none"))
+    val values=(if(ui.selectedModel==MODEL_ULTRA)listOf("high","medium","none") else if(ui.selectedModel.startsWith("agnes-"))listOf("high","medium","low","none") else listOf("high","low","none"))
     Dialog(onDismissRequest=onDismiss){
         Box(Modifier.fillMaxSize(),contentAlignment=Alignment.TopCenter){
             Text("Интеллект",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=28.dp))
