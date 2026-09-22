@@ -112,8 +112,8 @@ private fun ModeSelector(mode: WorkspaceMode, onMode: (WorkspaceMode) -> Unit) {
         animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
         label = "modeBubble"
     )
-    Box(
-        Modifier.align(Alignment.CenterHorizontally).padding(vertical = 6.dp).width(250.dp).height(40.dp)
+    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.Center){ Box(
+        Modifier.padding(vertical = 6.dp).width(250.dp).height(40.dp)
             .clip(RoundedCornerShape(20.dp)).background(Color(0xFF101010))
             .border(1.dp, Color(0xFF292929), RoundedCornerShape(20.dp))
     ) {
@@ -135,7 +135,7 @@ private fun ModeSelector(mode: WorkspaceMode, onMode: (WorkspaceMode) -> Unit) {
                 }
             }
         }
-    }
+    } }
 }
 
 @Composable
