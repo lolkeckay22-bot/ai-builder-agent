@@ -1,8 +1,19 @@
-import argparse, json, os, re, urllib.request, zipfile
+import argparse, base64, json, os, re, shutil, urllib.request, zipfile
 from pathlib import Path
 
 ROOT = Path("generated")
 MODEL = "nvidia/nemotron-3-super-120b-a12b"
+INPUT = Path("input")
+
+def fetch_attachments():
+    INPUT.mkdir(exist_ok=True)
+    items = json.loads(os.environ.get("ATTACHMENTS") or "[]")
+    token, repo = os.environ.get("GH_TOKEN", ""), os.environ.get("GITHUB_REPOSITORY", "")
+    for item in items:
+        name = Path(str(item.get("name") or "file.bin")).name
+        req = urllib.request.Request(f"https://api.github.com/repos/{repo}/git/blobs/{item['sha']}", headers={"Authorization":f"Bearer {token}","Accept":"application/vnd.github+json","User-Agent":"WorkAI-Builder"})
+        with urllib.request.urlopen(req, timeout=120) as response: payload=json.load(response)
+        (INPUT/name).write_bytes(base64.b64decode(payload["content"]))
 
 def call_ai(system, user, max_tokens=6000):
     payload = json.dumps({"model": MODEL, "messages": [{"role":"system","content":system},{"role":"user","content":user}], "temperature":0.35, "max_tokens":max_tokens, "stream":False}).encode()
@@ -55,20 +66,50 @@ def repair(log):
     fixed = re.sub(r"^```(?:kotlin)?\s*|\s*```$", "", fixed, flags=re.S)
     target.write_text(fixed)
 
-def make_mtz(prompt, job_id):
+def make_archive(prompt, job_id, kind):
     out = Path("output"); out.mkdir(exist_ok=True)
+    source = next((p for p in INPUT.iterdir() if p.suffix.lower() in (".mtz", ".zip")), None) if INPUT.exists() else None
+    if source:
+        folder=Path("archive_work"); shutil.rmtree(folder,ignore_errors=True); folder.mkdir()
+        with zipfile.ZipFile(source) as z:
+            for info in z.infolist():
+                target=(folder/info.filename).resolve()
+                if str(target).startswith(str(folder.resolve())): z.extract(info,folder)
+        tree=[]
+        for p in folder.rglob("*"):
+            if p.is_file():
+                rel=p.relative_to(folder).as_posix(); row={"path":rel,"size":p.stat().st_size}
+                if p.suffix.lower() in (".xml",".json",".txt",".md",".html",".css",".js",".properties") and p.stat().st_size<120000:
+                    row["content"]=p.read_text(errors="ignore")[:30000]
+                tree.append(row)
+        system='''Ты редактор ZIP/MTZ. Верни только JSON: {"edits":[{"path":"путь","content":"полное новое содержимое"}],"deletes":["путь"]}. Меняй только то, что требуется. Не выдумывай бинарные файлы и не используй ../. Для MTZ сохраняй совместимость HyperOS/MIUI.'''
+        plan=object_from(call_ai(system,f"ЗАДАЧА:\n{prompt}\n\nФАЙЛЫ:\n{json.dumps(tree,ensure_ascii=False)[:100000]}",6000))
+        for rel in plan.get("deletes",[]):
+            target=(folder/str(rel)).resolve()
+            if str(target).startswith(str(folder.resolve())) and target.is_file(): target.unlink()
+        for edit in plan.get("edits",[]):
+            target=(folder/str(edit.get("path", ""))).resolve()
+            if str(target).startswith(str(folder.resolve())):
+                target.parent.mkdir(parents=True,exist_ok=True); target.write_text(str(edit.get("content","")))
+        suffix=".mtz" if kind=="mtz" else ".zip"
+        with zipfile.ZipFile(out/f"WorkAI-{job_id}{suffix}","w",zipfile.ZIP_DEFLATED) as z:
+            for p in folder.rglob("*"):
+                if p.is_file(): z.write(p,p.relative_to(folder))
+        return
     raw = object_from(call_ai('Верни только JSON для темы HyperOS: {"name":"...","author":"WorkAI","primary":"#RRGGBB","secondary":"#RRGGBB","description":"..."}.', prompt, 900))
     folder=Path("mtz"); folder.mkdir(exist_ok=True)
     (folder/"description.xml").write_text(f'''<?xml version="1.0" encoding="UTF-8"?><MIUI-Theme><title>{raw.get("name","WorkAI Theme")}</title><designer>WorkAI</designer><author>{raw.get("author","WorkAI")}</author><version>1.0</version><uiVersion>14</uiVersion></MIUI-Theme>''')
     (folder/"theme_values.xml").write_text(f'''<MIUI_Theme_Values><color name="workai_primary">{raw.get("primary","#10A37F")}</color><color name="workai_secondary">{raw.get("secondary","#171719")}</color></MIUI_Theme_Values>''')
     (folder/"README.txt").write_text(str(raw.get("description", prompt)))
-    with zipfile.ZipFile(out/f"WorkAI-{job_id}.mtz","w",zipfile.ZIP_DEFLATED) as z:
+    suffix=".mtz" if kind=="mtz" else ".zip"
+    with zipfile.ZipFile(out/f"WorkAI-{job_id}{suffix}","w",zipfile.ZIP_DEFLATED) as z:
         for p in folder.rglob("*"): z.write(p,p.relative_to(folder))
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument("command",choices=["generate","repair"]); p.add_argument("--prompt",default=""); p.add_argument("--kind",default="apk"); p.add_argument("--job",default="job"); p.add_argument("--log",default="build.log"); a=p.parse_args()
+    p=argparse.ArgumentParser(); p.add_argument("command",choices=["fetch","generate","repair"]); p.add_argument("--prompt",default=""); p.add_argument("--kind",default="apk"); p.add_argument("--job",default="job"); p.add_argument("--log",default="build.log"); a=p.parse_args()
+    if a.command=="fetch": fetch_attachments(); return
     if a.command=="repair": repair(Path(a.log).read_text(errors="ignore")); return
     if a.kind=="apk":
         name=android_template(a.prompt); Path("app_name.txt").write_text(name)
-    else: make_mtz(a.prompt,a.job)
+    else: make_archive(a.prompt,a.job,a.kind)
 if __name__=="__main__": main()

@@ -18,12 +18,14 @@ jobs:
       JOB_ID: ${{ github.event.client_payload.id }}
       KIND: ${{ github.event.client_payload.kind }}
       PROMPT: ${{ github.event.client_payload.prompt }}
+      ATTACHMENTS: ${{ toJson(github.event.client_payload.attachments) }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Reading request
         uses: actions/checkout@v4
       - name: Planning files
         run: |
+          python3 builder/generate.py fetch --job "$JOB_ID"
           python3 builder/generate.py generate --kind "$KIND" --job "$JOB_ID" --prompt "$PROMPT"
       - name: Preparing Android SDK
         if: env.KIND == 'apk'

@@ -118,12 +118,26 @@ async function startJob(request, env, url) {
   if (!["apk", "mtz", "zip"].includes(kind)) return json({ error: "unsupported_kind" }, 400, cors(request));
   const id = crypto.randomUUID();
   const tasks = await createPlan(env, prompt, kind);
+  const attachments = [];
+  for (const item of (Array.isArray(body.attachments) ? body.attachments : []).slice(0, 8)) {
+    const name = String(item?.name || "file.bin").replace(/[^\p{L}\p{N}._ -]/gu, "_").slice(0, 120);
+    const mime = String(item?.mime || "application/octet-stream").slice(0, 120);
+    const base64 = String(item?.base64 || "");
+    if (!base64 || base64.length > 36_000_000) throw new Error(`invalid_attachment:${name}`);
+    const created = await github(env, "/git/blobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: base64, encoding: "base64" }),
+    });
+    if (!created.ok) throw new Error(`attachment_upload_failed:${name}:${created.status}`);
+    attachments.push({ name, mime, sha: (await created.json()).sha });
+  }
   const dispatch = await github(env, "/dispatches", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       event_type: "workai_build",
-      client_payload: { id, prompt, kind, tasks, callback_origin: url.origin },
+      client_payload: { id, prompt, kind, tasks, attachments, callback_origin: url.origin },
     }),
   });
   if (!dispatch.ok) return json({ error: "dispatch_failed", detail: (await dispatch.text()).slice(0, 500) }, 502, cors(request));

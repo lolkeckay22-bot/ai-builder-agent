@@ -30,12 +30,20 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
+import android.widget.TextView
+import android.text.method.LinkMovementMethod
+import io.noties.markwon.Markwon
+import io.noties.markwon.ext.tables.TablePlugin
+import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
+import io.noties.markwon.ext.tasklist.TaskListPlugin
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
 
-private val Accent = Color(0xFF10A37F)
+private val Accent = Color(0xFF0A84FF)
 
 @Composable
 fun ForgeFlowApp(vm: AgentViewModel = viewModel()) {
@@ -45,7 +53,7 @@ fun ForgeFlowApp(vm: AgentViewModel = viewModel()) {
     LaunchedEffect(ui.drawerOpen) { if (ui.drawerOpen) drawerState.open() else drawerState.close() }
     LaunchedEffect(drawerState.currentValue) { if (drawerState.isClosed && ui.drawerOpen) vm.openDrawer(false) }
 
-    MaterialTheme(colorScheme = darkColorScheme(primary = Accent, surface = Color(0xFF171719), background = Color(0xFF111113))) {
+    MaterialTheme(colorScheme = darkColorScheme(primary = Accent, surface = Color(0xFF242424), surfaceVariant = Color(0xFF303030), background = Color.Black)) {
         ModalNavigationDrawer(
             drawerState = drawerState,
             gesturesEnabled = true,
@@ -72,7 +80,7 @@ private fun Workspace(ui: AppUiState, vm: AgentViewModel, openHistory: () -> Uni
             },
             navigationIcon = { IconButton(onClick = openHistory) { Icon(Icons.Default.Menu, "История") } },
             actions = {
-                IconButton(onClick = { vm.newChat(ui.mode) }) { Icon(Icons.Default.Edit, "Новый чат") }
+                IconButton(onClick = { vm.newChat(ui.mode) }) { Icon(Icons.Default.Create, "Новый чат") }
                 IconButton(onClick = { vm.openSettings(true) }) { Icon(Icons.Default.MoreVert, "Настройки") }
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
@@ -91,14 +99,14 @@ private fun Workspace(ui: AppUiState, vm: AgentViewModel, openHistory: () -> Uni
 
 @Composable
 private fun ModeSelector(mode: WorkspaceMode, onMode: (WorkspaceMode) -> Unit) {
-    SingleChoiceSegmentedButtonRow(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).fillMaxWidth()) {
+    SingleChoiceSegmentedButtonRow(Modifier.padding(horizontal = 74.dp, vertical = 6.dp).fillMaxWidth()) {
         WorkspaceMode.entries.forEachIndexed { index, item ->
             SegmentedButton(
                 selected = mode == item,
                 onClick = { onMode(item) },
                 shape = SegmentedButtonDefaults.itemShape(index, WorkspaceMode.entries.size),
                 label = { Text(if (item == WorkspaceMode.CHAT) "Чат" else "Работа") },
-                icon = { Icon(if (item == WorkspaceMode.CHAT) Icons.Default.ChatBubbleOutline else Icons.Default.Build, null, Modifier.size(17.dp)) }
+                icon = {}
             )
         }
     }
@@ -127,7 +135,7 @@ private fun ConversationBody(
         chat.artifact?.let { artifact ->
             item { ArtifactCard(artifact, onDownload = { onDownload(artifact) }, onShare = { onShare(artifact) }) }
         }
-        if (running) item { TypingIndicator() }
+        if (running && chat.messages.lastOrNull()?.role != MessageRole.ASSISTANT) item { TypingIndicator() }
     }
 }
 
@@ -152,8 +160,8 @@ private fun MessageBubble(message: ChatMessage) {
         if (!user && message.thinking != null) {
             Surface(onClick = { thinkingOpen = !thinkingOpen }, color = Color.Transparent, shape = RoundedCornerShape(12.dp)) {
                 Row(Modifier.padding(horizontal = 4.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (message.text.isBlank()) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp, color = Accent) else Icon(Icons.Default.AutoAwesome, null, Modifier.size(16.dp), tint = Accent)
-                    Spacer(Modifier.width(7.dp)); Text(if (message.text.isBlank()) "Думаю…" else "Ход работы", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (message.text.isBlank() && message.thinking.isNullOrBlank()) Box(Modifier.size(15.dp).clip(CircleShape).background(Accent)) else Icon(Icons.Default.AutoAwesome, null, Modifier.size(16.dp), tint = Accent)
+                    Spacer(Modifier.width(7.dp)); Text("Размышление", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Icon(if (thinkingOpen) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(18.dp))
                 }
             }
@@ -186,10 +194,13 @@ private fun MessageBubble(message: ChatMessage) {
 
 @Composable
 private fun MarkdownText(source:String, modifier:Modifier=Modifier){
-    val parts=source.split("```")
-    Column(modifier, verticalArrangement=Arrangement.spacedBy(8.dp)){
-        parts.forEachIndexed{index,part->if(index%2==1){Surface(color=Color(0xFF202124),shape=RoundedCornerShape(10.dp),modifier=Modifier.fillMaxWidth()){SelectionContainer{Text(part.trim().substringAfter('\n',part.trim()),Modifier.padding(12.dp),fontFamily=FontFamily.Monospace,style=MaterialTheme.typography.bodySmall)}}}else if(part.isNotEmpty()){val styled=buildAnnotatedString{var cursor=0;val regex=Regex("\\*\\*(.+?)\\*\\*|`([^`]+)`");regex.findAll(part).forEach{m->append(part.substring(cursor,m.range.first));if(m.groupValues[1].isNotEmpty())pushStyle(SpanStyle(fontWeight=FontWeight.Bold))else pushStyle(SpanStyle(fontFamily=FontFamily.Monospace,background=MaterialTheme.colorScheme.surfaceVariant));append(m.groupValues[1].ifEmpty{m.groupValues[2]});pop();cursor=m.range.last+1};append(part.substring(cursor))};SelectionContainer{Text(styled,style=MaterialTheme.typography.bodyLarge)}}}
-    }
+    val context=LocalContext.current
+    val markwon=remember(context){Markwon.builder(context).usePlugin(TablePlugin.create(context)).usePlugin(StrikethroughPlugin.create()).usePlugin(TaskListPlugin.create(context)).build()}
+    AndroidView(
+        modifier=modifier.fillMaxWidth(),
+        factory={TextView(it).apply{setTextColor(android.graphics.Color.WHITE);textSize=17f;setTextIsSelectable(true);movementMethod=LinkMovementMethod.getInstance();setLineSpacing(0f,1.13f)}},
+        update={markwon.setMarkdown(it,source)}
+    )
 }
 
 @Composable
@@ -219,11 +230,7 @@ private fun TodoCard(todos: List<WorkTodo>) {
 
 @Composable
 private fun TypingIndicator() {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Accent)
-        Spacer(Modifier.width(10.dp))
-        Text("Обрабатываю запрос…", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-    }
+    Box(Modifier.size(18.dp).clip(CircleShape).background(Accent))
 }
 
 @Composable
@@ -251,42 +258,34 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
     val running = ui.activeId in ui.runningIds
     var modelsOpen by remember { mutableStateOf(false) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> vm.addAttachments(uris) }
-    Surface(color = MaterialTheme.colorScheme.background, tonalElevation = 2.dp) {
+    Surface(color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp).navigationBarsPadding()) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box {
-                    TextButton(onClick = { modelsOpen = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
-                        Icon(Icons.Default.Memory, null, Modifier.size(16.dp)); Spacer(Modifier.width(5.dp))
-                        Text(if (ui.selectedModel == MODEL_ULTRA) "Nemotron Ultra 550B" else "Nemotron Super 120B", style = MaterialTheme.typography.labelMedium)
-                        Icon(Icons.Default.ArrowDropDown, null, Modifier.size(18.dp))
-                    }
-                    DropdownMenu(expanded = modelsOpen, onDismissRequest = { modelsOpen = false }) {
-                        DropdownMenuItem(text = { Text("Nemotron Super 120B") }, leadingIcon = { if (ui.selectedModel == MODEL_SUPER) Icon(Icons.Default.Check, null) }, onClick = { vm.selectModel(MODEL_SUPER); modelsOpen = false })
-                        DropdownMenuItem(text = { Text("Nemotron Ultra 550B") }, leadingIcon = { if (ui.selectedModel == MODEL_ULTRA) Icon(Icons.Default.Check, null) }, onClick = { vm.selectModel(MODEL_ULTRA); modelsOpen = false })
-                    }
-                }
-            }
             if (ui.attachments.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 ui.attachments.take(3).forEach { file -> InputChip(selected = true, onClick = { vm.removeAttachment(file.name) }, label = { Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis) }, trailingIcon = { Icon(Icons.Default.Close, "Убрать", Modifier.size(15.dp)) }, modifier = Modifier.widthIn(max = 150.dp)) }
             }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
-                IconButton(onClick = { picker.launch(arrayOf("*/*")) }) { Icon(Icons.Default.Add, "Добавить файл") }
-                OutlinedTextField(
-                    value = ui.input,
-                    onValueChange = vm::setInput,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text(if (ui.mode == WorkspaceMode.CHAT) "Сообщение…" else "Опишите задачу…") },
-                    shape = RoundedCornerShape(26.dp),
-                    maxLines = 5,
-                    trailingIcon = {
-                        FilledIconButton(onClick = { if (running) vm.stop() else vm.send() }, enabled = running || ui.input.isNotBlank(), colors = IconButtonDefaults.filledIconButtonColors(containerColor = if (running || ui.input.isNotBlank()) Accent else MaterialTheme.colorScheme.surfaceVariant)) {
-                            Icon(if (running) Icons.Default.Stop else Icons.Default.ArrowUpward, if (running) "Остановить" else "Отправить")
-                        }
+            Surface(shape=RoundedCornerShape(28.dp),color=Color(0xFF242424),modifier=Modifier.fillMaxWidth()){
+                Column(Modifier.padding(horizontal=8.dp,vertical=5.dp)){
+                    androidx.compose.foundation.text.BasicTextField(value=ui.input,onValueChange=vm::setInput,modifier=Modifier.fillMaxWidth().heightIn(min=42.dp,max=130.dp).padding(horizontal=10.dp,vertical=10.dp),textStyle=MaterialTheme.typography.bodyLarge.copy(color=Color.White),cursorBrush=androidx.compose.ui.graphics.SolidColor(Accent),decorationBox={inner->Box{if(ui.input.isEmpty())Text(if(ui.mode==WorkspaceMode.CHAT)"Сообщение…" else "Опишите задачу…",color=Color(0xFF9B9B9B));inner()}})
+                    Row(verticalAlignment=Alignment.CenterVertically){
+                        IconButton(onClick={picker.launch(arrayOf("*/*"))},modifier=Modifier.size(42.dp)){Icon(Icons.Default.Add,"Добавить файл")}
+                        TextButton(onClick={modelsOpen=true}){Text(if(ui.selectedModel==MODEL_ULTRA)"Nemotron Ultra 550B" else "Nemotron Super 120B",color=Color.White);Icon(Icons.Default.KeyboardArrowDown,null)}
+                        Spacer(Modifier.weight(1f))
+                        FilledIconButton(onClick={if(running)vm.stop() else vm.send()},enabled=running||ui.input.isNotBlank(),colors=IconButtonDefaults.filledIconButtonColors(containerColor=if(running||ui.input.isNotBlank())Accent else Color(0xFF3B3B3B))){Icon(if(running)Icons.Default.Stop else Icons.Default.ArrowUpward,if(running)"Остановить" else "Отправить")}
                     }
-                )
+                }
             }
         }
     }
+    if(modelsOpen) ModalBottomSheet(onDismissRequest={modelsOpen=false},containerColor=Color(0xFF202020)){
+        Text("Модель",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.padding(horizontal=24.dp,vertical=8.dp))
+        ModelRow("Nemotron Super 120B","Быстрая модель",ui.selectedModel==MODEL_SUPER){vm.selectModel(MODEL_SUPER);modelsOpen=false}
+        ModelRow("Nemotron Ultra 550B","Максимальное качество",ui.selectedModel==MODEL_ULTRA){vm.selectModel(MODEL_ULTRA);modelsOpen=false}
+        Spacer(Modifier.navigationBarsPadding().height(16.dp))
+    }
+}
+
+@Composable private fun ModelRow(title:String,subtitle:String,selected:Boolean,onClick:()->Unit){
+    Row(Modifier.fillMaxWidth().clickable(onClick=onClick).padding(horizontal=24.dp,vertical=17.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(title,style=MaterialTheme.typography.titleMedium);Text(subtitle,color=MaterialTheme.colorScheme.onSurfaceVariant,style=MaterialTheme.typography.bodySmall)};if(selected)Icon(Icons.Default.Check,null)}
 }
 
 @Composable
