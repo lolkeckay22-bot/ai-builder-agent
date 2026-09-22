@@ -305,8 +305,15 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
                     androidx.compose.foundation.text.BasicTextField(value=ui.input,onValueChange=vm::setInput,modifier=Modifier.fillMaxWidth().heightIn(min=42.dp,max=130.dp).padding(horizontal=10.dp,vertical=10.dp),textStyle=MaterialTheme.typography.bodyLarge.copy(color=Color.White),cursorBrush=androidx.compose.ui.graphics.SolidColor(Accent),decorationBox={inner->Box{if(ui.input.isEmpty())Text(if(ui.mode==WorkspaceMode.CHAT)"Сообщение…" else "Опишите задачу…",color=Color(0xFF9B9B9B));inner()}})
                     Row(verticalAlignment=Alignment.CenterVertically){
                         IconButton(onClick={picker.launch("*/*")},modifier=Modifier.size(42.dp)){Icon(Icons.Default.Add,"Добавить файл")}
-                        AssistChip(onClick={reasoningOpen=true},label={Text(reasoningLabel(ui.reasoningEffort))},leadingIcon={Icon(Icons.Default.Psychology,null,Modifier.size(17.dp))},colors=AssistChipDefaults.assistChipColors(labelColor=if(ui.reasoningEffort=="none")Color.White else Accent,leadingIconContentColor=if(ui.reasoningEffort=="none")Color.White else Accent))
-                        TextButton(onClick={modelsOpen=true},contentPadding=PaddingValues(horizontal=8.dp)){Text(modelShort(ui.selectedModel),color=Color.White);Icon(Icons.Default.KeyboardArrowDown,null,Modifier.size(17.dp))}
+                        Column(
+                            Modifier.clip(RoundedCornerShape(12.dp)).clickable{modelsOpen=true}.padding(horizontal=8.dp,vertical=3.dp)
+                        ){
+                            Row(verticalAlignment=Alignment.CenterVertically){
+                                Text("${modelShort(ui.selectedModel)} · ${reasoningLabel(ui.reasoningEffort)}",color=Color.White,fontWeight=FontWeight.SemiBold,style=MaterialTheme.typography.bodyMedium)
+                                Icon(Icons.Default.KeyboardArrowDown,null,Modifier.size(17.dp),tint=Accent)
+                            }
+                            Text("Уровень размышлений",color=Color(0xFF9B9B9B),style=MaterialTheme.typography.labelSmall)
+                        }
                         Spacer(Modifier.weight(1f))
                         val canSend=running||ui.input.isNotBlank()||ui.attachments.isNotEmpty()
                         Surface(shape=CircleShape,color=if(canSend)Accent else Color(0xFF3B3B3B),modifier=Modifier.size(40.dp).pointerInput(canSend,running){detectTapGestures(onTap={if(canSend){if(running)vm.stop() else vm.send()}},onLongPress={if(!running)reasoningOpen=true})}){Box(contentAlignment=Alignment.Center){Icon(if(running)Icons.Default.Stop else Icons.Default.ArrowUpward,if(running)"Остановить" else "Отправить",tint=if(canSend)Color.White else Color(0xFF8A8A8A))}}
@@ -318,14 +325,18 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
     if(reasoningOpen) ReasoningPopup(ui,onDismiss={reasoningOpen=false},onSelect={vm.selectReasoning(it)})
     if(modelsOpen) ModalBottomSheet(onDismissRequest={modelsOpen=false},containerColor=Color(0xFF202020)){
         Text("Настройка",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.align(Alignment.CenterHorizontally).padding(vertical=8.dp))
+        Row(Modifier.fillMaxWidth().padding(horizontal=28.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.Center){
+            Text("${modelShort(ui.selectedModel)} ${reasoningLabel(ui.reasoningEffort)}",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
+            Spacer(Modifier.width(6.dp));Icon(Icons.Default.ChevronRight,null,tint=Color(0xFFBDBDBD))
+        }
+        IntelligenceSlider(ui,vm::selectReasoning)
+        Text("Модель",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(start=28.dp,bottom=10.dp))
         Column(Modifier.padding(horizontal=20.dp).clip(RoundedCornerShape(24.dp)).background(Color(0xFF414141))){
             listOf(MODEL_SUPER,MODEL_ULTRA,MODEL_AGNES_25,MODEL_AGNES_30).forEach{model->
                 ModelRow(modelTitle(model),modelSubtitle(model),ui.selectedModel==model){vm.selectModel(model)}
                 if(model!=MODEL_AGNES_30)HorizontalDivider(color=Color(0xFF252525))
             }
         }
-        Text("Интеллект",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(start=28.dp,top=22.dp))
-        IntelligenceSlider(ui,vm::selectReasoning)
         Button(onClick={modelsOpen=false},modifier=Modifier.fillMaxWidth().padding(horizontal=28.dp),colors=ButtonDefaults.buttonColors(containerColor=Color.White,contentColor=Color.Black)){Text("Готово",fontWeight=FontWeight.Bold)}
         Spacer(Modifier.navigationBarsPadding().height(16.dp))
     }
