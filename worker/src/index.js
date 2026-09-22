@@ -61,14 +61,16 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
   throw new Error(`NVIDIA ${lastStatus || "network"}: ${lastText.slice(0, 300)}`);
 }
 
-async function nvidiaStream(env, messages, requestedModel) {
+async function nvidiaStream(env, messages, requestedModel, requestedEffort) {
   const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : (env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b");
+  const allowed = model.includes("ultra") ? new Set(["none", "medium", "high"]) : new Set(["none", "low", "high"]);
+  const reasoningEffort = allowed.has(requestedEffort) ? requestedEffort : (model.includes("ultra") ? "medium" : "low");
   let lastText = "";
   for (let attempt = 0; attempt < 5; attempt++) {
     const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
       method: "POST",
       headers: { "authorization": `Bearer ${env.NVIDIA_API_KEY}`, "content-type": "application/json", "accept": "text/event-stream" },
-      body: JSON.stringify({ model, messages, temperature: 0.45, max_tokens: 4096, stream: true }),
+      body: JSON.stringify({ model, messages, temperature: 0.45, max_tokens: 4096, stream: true, reasoning_effort: reasoningEffort }),
     });
     if (response.ok) return response;
     lastText = await response.text();
@@ -217,7 +219,7 @@ export default {
         const model = ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL;
         const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
         const system = { role: "system", content: `Ты WorkAI — мобильный AI-агент. Используй Markdown: **жирный текст**, списки и тройные backticks для кода. Если приложен разбор MTZ, анализируй структуру темы, manifest, XML и ресурсы как специалист по HyperOS/MIUI. Доступные навыки: Android/Jetpack Compose, Gradle, APK build/debug, MTZ/ZIP-анализ, XML/JSON, редактирование архивов, проверка результата. Не раскрывай внутренний chain-of-thought; давай только вывод и краткие понятные этапы. Текущая модель: ${model}.` };
-        const upstream = await nvidiaStream(env, [system, ...messages], model);
+        const upstream = await nvidiaStream(env, [system, ...messages], model, String(body.reasoning_effort || ""));
         return new Response(upstream.body, { status: 200, headers: { ...cors(request), "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "x-accel-buffering": "no" } });
       }
       if (url.pathname === "/v1/jobs" && request.method === "POST") return await startJob(request, env, url);

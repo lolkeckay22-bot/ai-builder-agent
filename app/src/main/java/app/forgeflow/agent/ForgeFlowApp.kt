@@ -31,6 +31,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.viewinterop.AndroidView
 import android.widget.TextView
 import android.text.method.LinkMovementMethod
@@ -70,22 +72,20 @@ fun ForgeFlowApp(vm: AgentViewModel = viewModel()) {
 @Composable
 private fun Workspace(ui: AppUiState, vm: AgentViewModel, openHistory: () -> Unit) {
     val chat = ui.active
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val openDrawer = { focusManager.clearFocus(); keyboard?.hide(); openHistory() }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        TopAppBar(
-            title = {
-                Column {
-                    Text(chat?.title ?: "ForgeFlow", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
-                    if (chat?.id in ui.runningIds) Text("Nemotron работает…", color = Accent, style = MaterialTheme.typography.labelSmall)
-                }
-            },
-            navigationIcon = { IconButton(onClick = openHistory) { Icon(Icons.Default.Menu, "История") } },
+        CenterAlignedTopAppBar(
+            title = { Text(if(chat?.messages?.isNotEmpty()==true) if(chat.mode==WorkspaceMode.WORK) "Работа" else "Чат" else "Новый чат", style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold) },
+            navigationIcon = { FilledIconButton(onClick = openDrawer, colors=IconButtonDefaults.filledIconButtonColors(containerColor=Color(0xFF242424))) { Icon(Icons.Default.Menu, "История") } },
             actions = {
                 IconButton(onClick = { vm.newChat(ui.mode) }) { Icon(Icons.Default.Create, "Новый чат") }
                 IconButton(onClick = { vm.openSettings(true) }) { Icon(Icons.Default.MoreVert, "Настройки") }
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
         )
-        ModeSelector(ui.mode, vm::switchMode)
+        if(chat?.messages?.isEmpty()!=false) ModeSelector(ui.mode, vm::switchMode)
         if (chat != null) ConversationBody(
             chat = chat,
             running = chat.id in ui.runningIds,
@@ -157,17 +157,22 @@ private fun MessageBubble(message: ChatMessage) {
     val clipboard = LocalClipboardManager.current
     var thinkingOpen by remember(message.createdAt) { mutableStateOf(message.text.isBlank()) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (user) Alignment.End else Alignment.Start) {
-        if (!user && message.thinking != null) {
+        if (!user && message.thinking != null && (message.text.isBlank() || message.thinking.isNotBlank())) {
             Surface(onClick = { thinkingOpen = !thinkingOpen }, color = Color.Transparent, shape = RoundedCornerShape(12.dp)) {
                 Row(Modifier.padding(horizontal = 4.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (message.text.isBlank() && message.thinking.isNullOrBlank()) Box(Modifier.size(15.dp).clip(CircleShape).background(Accent)) else Icon(Icons.Default.AutoAwesome, null, Modifier.size(16.dp), tint = Accent)
-                    Spacer(Modifier.width(7.dp)); Text("Размышление", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (message.text.isBlank() && message.thinking.isNullOrBlank()) { Box(Modifier.size(15.dp).clip(CircleShape).background(Accent)); Spacer(Modifier.width(8.dp)) }
+                    Text("Размышление", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Icon(if (thinkingOpen) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(18.dp))
                 }
             }
-            AnimatedVisibility(thinkingOpen) { Text(message.thinking, modifier = Modifier.padding(start = 4.dp, bottom = 5.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            AnimatedVisibility(thinkingOpen && message.thinking.isNotBlank()) {
+                Row(Modifier.padding(start=4.dp,bottom=8.dp)){
+                    Box(Modifier.width(2.dp).fillMaxHeight().background(Color(0xFF3A3A3A)))
+                    Text(message.thinking.orEmpty(), modifier = Modifier.padding(start = 14.dp), style = MaterialTheme.typography.bodyMedium, color = Color(0xFFB7B7B7))
+                }
+            }
         }
-        IconButton(
+        if(message.text.isNotBlank()) IconButton(
             onClick = { clipboard.setText(AnnotatedString(message.text)) },
             modifier = Modifier.size(30.dp)
         ) { Icon(Icons.Default.ContentCopy, "Копировать", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -257,9 +262,11 @@ private fun ArtifactCard(artifact: WorkArtifact, onDownload: () -> Unit, onShare
 private fun Composer(ui: AppUiState, vm: AgentViewModel) {
     val running = ui.activeId in ui.runningIds
     var modelsOpen by remember { mutableStateOf(false) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> vm.addAttachments(uris) }
+    var reasoningOpen by remember { mutableStateOf(false) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris -> vm.addAttachments(uris) }
     Surface(color = MaterialTheme.colorScheme.background) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp).navigationBarsPadding()) {
+        Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 12.dp, vertical = 8.dp).navigationBarsPadding()) {
+            if(ui.error!=null) Text(ui.error,Modifier.padding(horizontal=12.dp,vertical=4.dp),color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.labelSmall)
             if (ui.attachments.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 ui.attachments.take(3).forEach { file -> InputChip(selected = true, onClick = { vm.removeAttachment(file.name) }, label = { Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis) }, trailingIcon = { Icon(Icons.Default.Close, "Убрать", Modifier.size(15.dp)) }, modifier = Modifier.widthIn(max = 150.dp)) }
             }
@@ -267,20 +274,42 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
                 Column(Modifier.padding(horizontal=8.dp,vertical=5.dp)){
                     androidx.compose.foundation.text.BasicTextField(value=ui.input,onValueChange=vm::setInput,modifier=Modifier.fillMaxWidth().heightIn(min=42.dp,max=130.dp).padding(horizontal=10.dp,vertical=10.dp),textStyle=MaterialTheme.typography.bodyLarge.copy(color=Color.White),cursorBrush=androidx.compose.ui.graphics.SolidColor(Accent),decorationBox={inner->Box{if(ui.input.isEmpty())Text(if(ui.mode==WorkspaceMode.CHAT)"Сообщение…" else "Опишите задачу…",color=Color(0xFF9B9B9B));inner()}})
                     Row(verticalAlignment=Alignment.CenterVertically){
-                        IconButton(onClick={picker.launch(arrayOf("*/*"))},modifier=Modifier.size(42.dp)){Icon(Icons.Default.Add,"Добавить файл")}
-                        TextButton(onClick={modelsOpen=true}){Text(if(ui.selectedModel==MODEL_ULTRA)"Nemotron Ultra 550B" else "Nemotron Super 120B",color=Color.White);Icon(Icons.Default.KeyboardArrowDown,null)}
+                        IconButton(onClick={picker.launch("*/*")},modifier=Modifier.size(42.dp)){Icon(Icons.Default.Add,"Добавить файл")}
+                        AssistChip(onClick={reasoningOpen=true},label={Text(reasoningLabel(ui.reasoningEffort))},leadingIcon={Icon(Icons.Default.Psychology,null,Modifier.size(17.dp))},colors=AssistChipDefaults.assistChipColors(labelColor=if(ui.reasoningEffort=="none")Color.White else Accent,leadingIconContentColor=if(ui.reasoningEffort=="none")Color.White else Accent))
+                        TextButton(onClick={modelsOpen=true},contentPadding=PaddingValues(horizontal=8.dp)){Text(if(ui.selectedModel==MODEL_ULTRA)"Ultra" else "Super",color=Color.White);Icon(Icons.Default.KeyboardArrowDown,null,Modifier.size(17.dp))}
                         Spacer(Modifier.weight(1f))
-                        FilledIconButton(onClick={if(running)vm.stop() else vm.send()},enabled=running||ui.input.isNotBlank(),colors=IconButtonDefaults.filledIconButtonColors(containerColor=if(running||ui.input.isNotBlank())Accent else Color(0xFF3B3B3B))){Icon(if(running)Icons.Default.Stop else Icons.Default.ArrowUpward,if(running)"Остановить" else "Отправить")}
+                        FilledIconButton(onClick={if(running)vm.stop() else vm.send()},enabled=running||ui.input.isNotBlank()||ui.attachments.isNotEmpty(),colors=IconButtonDefaults.filledIconButtonColors(containerColor=if(running||ui.input.isNotBlank()||ui.attachments.isNotEmpty())Accent else Color(0xFF3B3B3B))){Icon(if(running)Icons.Default.Stop else Icons.Default.ArrowUpward,if(running)"Остановить" else "Отправить")}
                     }
                 }
             }
         }
     }
+    if(reasoningOpen) ReasoningSheet(ui,onDismiss={reasoningOpen=false},onSelect={vm.selectReasoning(it);reasoningOpen=false})
     if(modelsOpen) ModalBottomSheet(onDismissRequest={modelsOpen=false},containerColor=Color(0xFF202020)){
-        Text("Модель",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.padding(horizontal=24.dp,vertical=8.dp))
-        ModelRow("Nemotron Super 120B","Быстрая модель",ui.selectedModel==MODEL_SUPER){vm.selectModel(MODEL_SUPER);modelsOpen=false}
-        ModelRow("Nemotron Ultra 550B","Максимальное качество",ui.selectedModel==MODEL_ULTRA){vm.selectModel(MODEL_ULTRA);modelsOpen=false}
+        Text("Настройка",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.align(Alignment.CenterHorizontally).padding(vertical=8.dp))
+        Text("Интеллект",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(horizontal=24.dp,vertical=8.dp))
+        ReasoningChoices(ui,vm::selectReasoning)
+        HorizontalDivider(Modifier.padding(vertical=8.dp))
+        Text("Модель",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(horizontal=24.dp,vertical=8.dp))
+        ModelRow("Nemotron Super 120B","none · low · high",ui.selectedModel==MODEL_SUPER){vm.selectModel(MODEL_SUPER)}
+        ModelRow("Nemotron Ultra 550B","none · medium · high",ui.selectedModel==MODEL_ULTRA){vm.selectModel(MODEL_ULTRA)}
         Spacer(Modifier.navigationBarsPadding().height(16.dp))
+    }
+}
+
+private fun reasoningLabel(value:String)=when(value){"none"->"Без размышления";"low"->"Низкий";"medium"->"Средний";else->"Высокий"}
+
+@Composable private fun ReasoningChoices(ui:AppUiState,onSelect:(String)->Unit){
+    val values=if(ui.selectedModel==MODEL_ULTRA)listOf("none","medium","high") else listOf("none","low","high")
+    values.forEach{value->ModelRow(reasoningLabel(value),when(value){"none"->"Быстрый ответ без reasoning-токенов";"high"->"Полное размышление";else->"Экономное размышление"},ui.reasoningEffort==value){onSelect(value)}}
+}
+
+@Composable private fun ReasoningSheet(ui:AppUiState,onDismiss:()->Unit,onSelect:(String)->Unit){
+    ModalBottomSheet(onDismissRequest=onDismiss,containerColor=Color(0xFF202020)){
+        Text("Интеллект",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.align(Alignment.CenterHorizontally).padding(vertical=10.dp))
+        ReasoningChoices(ui,onSelect)
+        TextButton(onClick=onDismiss,modifier=Modifier.align(Alignment.End).padding(16.dp)){Text("Готово")}
+        Spacer(Modifier.navigationBarsPadding())
     }
 }
 
