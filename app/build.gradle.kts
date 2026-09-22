@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "app.forgeflow.agent"
+    namespace = "app.workai.agent"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "app.forgeflow.agent"
+        applicationId = "app.workai"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
