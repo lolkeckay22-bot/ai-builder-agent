@@ -42,7 +42,11 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.layout.ContentScale
 import android.widget.TextView
+import android.content.Intent
+import android.net.Uri
+import coil3.compose.AsyncImage
 import android.text.method.LinkMovementMethod
 import io.noties.markwon.Markwon
 import io.noties.markwon.ext.tables.TablePlugin
@@ -83,6 +87,7 @@ private fun Workspace(ui: AppUiState, vm: AgentViewModel, openHistory: () -> Uni
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val openDrawer = { focusManager.clearFocus(); keyboard?.hide(); openHistory() }
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         CenterAlignedTopAppBar(
             title = { Text(if(chat?.messages?.isNotEmpty()==true) if(chat.mode==WorkspaceMode.WORK) "Работа" else "Чат" else "Новый чат", style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold) },
@@ -99,9 +104,13 @@ private fun Workspace(ui: AppUiState, vm: AgentViewModel, openHistory: () -> Uni
             running = chat.id in ui.runningIds,
             modifier = Modifier.weight(1f),
             onDownload = { vm.downloadArtifact(it, false) },
-            onShare = { vm.downloadArtifact(it, true) }
+            onShare = { vm.downloadArtifact(it, true) },
+            onAcceptWork = vm::acceptWorkHandoff,
+            onDismissWork = vm::dismissWorkHandoff
         )
         Composer(ui, vm)
+    }
+    ui.downloadNotice?.let { DownloadBanner(it,vm::openDownload,vm::dismissDownload,Modifier.align(Alignment.BottomCenter).padding(start=12.dp,end=12.dp,bottom=112.dp)) }
     }
 }
 
@@ -144,7 +153,9 @@ private fun ConversationBody(
     running: Boolean,
     modifier: Modifier,
     onDownload: (WorkArtifact) -> Unit,
-    onShare: (WorkArtifact) -> Unit
+    onShare: (WorkArtifact) -> Unit,
+    onAcceptWork:(String)->Unit,
+    onDismissWork:(Long)->Unit
 ) {
     val listState = rememberLazyListState()
     val count = chat.messages.size
@@ -156,7 +167,7 @@ private fun ConversationBody(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         if (chat.messages.isEmpty()) item { EmptyState(chat.mode) }
-        items(chat.messages, key={it.createdAt}) { message -> MessageBubble(message,onDownload,onShare) }
+        items(chat.messages, key={it.createdAt}) { message -> MessageBubble(message,onDownload,onShare,onAcceptWork,onDismissWork) }
         if (running && chat.messages.lastOrNull()?.role != MessageRole.ASSISTANT) item { TypingIndicator() }
     }
 }
@@ -174,10 +185,11 @@ private fun EmptyState(mode: WorkspaceMode) {
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage,onDownload:(WorkArtifact)->Unit,onShare:(WorkArtifact)->Unit) {
+private fun MessageBubble(message: ChatMessage,onDownload:(WorkArtifact)->Unit,onShare:(WorkArtifact)->Unit,onAcceptWork:(String)->Unit,onDismissWork:(Long)->Unit) {
     val user = message.role == MessageRole.USER
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
+    var sourcesOpen by remember(message.createdAt) { mutableStateOf(false) }
     var thinkingOpen by remember(message.createdAt) { mutableStateOf(message.execution?.state==ExecutionState.RUNNING) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (user) Alignment.End else Alignment.Start) {
         val session=message.execution
@@ -224,10 +236,67 @@ private fun MessageBubble(message: ChatMessage,onDownload:(WorkArtifact)->Unit,o
             else MarkdownText(message.text, Modifier.padding(4.dp))
         }
         message.artifact?.let{artifact->if(!user){Spacer(Modifier.height(8.dp));ArtifactCard(artifact,onDownload={onDownload(artifact)},onShare={onShare(artifact)})}}
+        if(!user&&message.sources.isNotEmpty()) { Spacer(Modifier.height(8.dp)); SourcePill(message.sources){sourcesOpen=true} }
+        if(!user&&message.workHandoff!=null&&session?.state!=ExecutionState.RUNNING){
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){
+                Button(onClick={onAcceptWork(message.workHandoff)},colors=ButtonDefaults.buttonColors(containerColor=Color.White,contentColor=Color.Black)){Text("Перейти",fontWeight=FontWeight.SemiBold)}
+                TextButton(onClick={onDismissWork(message.createdAt)},colors=ButtonDefaults.textButtonColors(contentColor=Color(0xFFAAAAAA))){Text("Пропустить")}
+            }
+        }
         if(!user&&message.text.isNotBlank()&&session?.state!=ExecutionState.RUNNING){Row(Modifier.padding(top=4.dp),horizontalArrangement=Arrangement.spacedBy(4.dp)){
             IconButton(onClick={clipboard.setText(AnnotatedString(message.text))},modifier=Modifier.size(34.dp)){Icon(Icons.Default.ContentCopy,"Copy",Modifier.size(18.dp),tint=MaterialTheme.colorScheme.onSurfaceVariant)}
             IconButton(onClick={val intent=android.content.Intent(android.content.Intent.ACTION_SEND).apply{type="text/plain";putExtra(android.content.Intent.EXTRA_TEXT,message.text)};context.startActivity(android.content.Intent.createChooser(intent,"Поделиться ответом"))},modifier=Modifier.size(34.dp)){Icon(Icons.Default.Share,"Share",Modifier.size(18.dp),tint=MaterialTheme.colorScheme.onSurfaceVariant)}
         }}
+    }
+    if(sourcesOpen) SourcesSheet(message.sources,onDismiss={sourcesOpen=false})
+}
+
+@Composable
+private fun SourceIcon(source:WebSource,modifier:Modifier=Modifier){
+    Surface(modifier=modifier,shape=CircleShape,color=Color(0xFFF0F0F0)){
+        if(source.favicon.isNotBlank()) AsyncImage(model=source.favicon,contentDescription=null,contentScale=ContentScale.Crop,error=painterResource(android.R.drawable.ic_menu_compass),fallback=painterResource(android.R.drawable.ic_menu_compass),modifier=Modifier.fillMaxSize())
+        else Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){Icon(Icons.Default.Language,null,tint=Color(0xFF555555),modifier=Modifier.padding(5.dp))}
+    }
+}
+
+@Composable
+private fun SourcePill(sources:List<WebSource>,onClick:()->Unit){
+    val first=sources.first()
+    Surface(onClick=onClick,shape=RoundedCornerShape(50),color=Color(0xFF2D2D2D),modifier=Modifier.heightIn(min=38.dp).widthIn(max=280.dp)){
+        Row(Modifier.padding(horizontal=12.dp,vertical=6.dp),verticalAlignment=Alignment.CenterVertically){
+            SourceIcon(first,Modifier.size(28.dp));Spacer(Modifier.width(9.dp))
+            Text(first.domain,maxLines=1,overflow=TextOverflow.Ellipsis,color=Color(0xFFE1E1E1),modifier=Modifier.weight(1f,false))
+            if(sources.size>1) Text(" +${sources.size-1}",color=Color(0xFFE1E1E1),maxLines=1)
+        }
+    }
+}
+
+@Composable
+private fun SourcesSheet(sources:List<WebSource>,onDismiss:()->Unit){
+    val context=LocalContext.current
+    ModalBottomSheet(onDismissRequest=onDismiss,containerColor=Color(0xFF202020),scrimColor=Color.Black.copy(alpha=.65f)){
+        Row(Modifier.fillMaxWidth().padding(horizontal=22.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically){Text("Источники",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold,modifier=Modifier.weight(1f));IconButton(onClick=onDismiss){Icon(Icons.Default.Close,"Закрыть")}}
+        LazyColumn(contentPadding=PaddingValues(horizontal=16.dp,vertical=8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
+            items(sources,key={it.url}){source->
+                Surface(onClick={runCatching{context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(source.url))) }},shape=RoundedCornerShape(18.dp),color=Color(0xFF2B2B2B)){
+                    Row(Modifier.fillMaxWidth().padding(14.dp),verticalAlignment=Alignment.Top){SourceIcon(source,Modifier.size(34.dp));Spacer(Modifier.width(12.dp));Column{Text(source.title.ifBlank{source.domain},fontWeight=FontWeight.SemiBold,maxLines=2,overflow=TextOverflow.Ellipsis);Text(source.domain,color=Color(0xFFAAAAAA),style=MaterialTheme.typography.bodySmall);if(source.snippet.isNotBlank()){Spacer(Modifier.height(5.dp));Text(source.snippet,color=Color(0xFFCBCBCB),style=MaterialTheme.typography.bodySmall,maxLines=3,overflow=TextOverflow.Ellipsis)}}}
+                }
+            }
+        }
+        Spacer(Modifier.navigationBarsPadding().height(12.dp))
+    }
+}
+
+@Composable
+private fun DownloadBanner(notice:DownloadNotice,onOpen:()->Unit,onDismiss:()->Unit,modifier:Modifier=Modifier){
+    Surface(modifier=modifier.fillMaxWidth(),shape=RoundedCornerShape(12.dp),color=Color(0xFF232323),shadowElevation=10.dp){
+        Row(Modifier.padding(start=18.dp,end=8.dp,top=10.dp,bottom=10.dp),verticalAlignment=Alignment.CenterVertically){
+            Text(if(notice.phase==DownloadPhase.DOWNLOADING)"Начало скачивания" else "Скачивание завершено",style=MaterialTheme.typography.titleMedium,modifier=Modifier.weight(1f))
+            if(notice.phase==DownloadPhase.DOWNLOADING) CircularProgressIndicator(Modifier.size(22.dp),strokeWidth=2.dp)
+            else TextButton(onClick=onOpen){Text("Открыть",color=Color.White,fontWeight=FontWeight.Bold)}
+            IconButton(onClick=onDismiss){Icon(Icons.Default.Close,"Закрыть")}
+        }
     }
 }
 
