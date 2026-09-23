@@ -28,10 +28,11 @@ def fetch_attachments():
 
 def call_ai(system, user, max_tokens=6000):
     agnes = MODEL.startswith("agnes-")
-    endpoint = "https://apihub.agnes-ai.com/v1/chat/completions" if agnes else "https://integrate.api.nvidia.com/v1/chat/completions"
-    key = os.environ.get("AGNES_API_KEY") if agnes else os.environ.get("NVIDIA_API_KEY")
+    cohere = MODEL == "north-mini-code-1-0"
+    endpoint = "https://api.cohere.com/compatibility/v1/chat/completions" if cohere else "https://apihub.agnes-ai.com/v1/chat/completions" if agnes else "https://integrate.api.nvidia.com/v1/chat/completions"
+    key = os.environ.get("COHERE_API_KEY") if cohere else os.environ.get("AGNES_API_KEY") if agnes else os.environ.get("NVIDIA_API_KEY")
     model = MODEL
-    if agnes and not key:
+    if (agnes or cohere) and not key:
         endpoint, key, model = "https://integrate.api.nvidia.com/v1/chat/completions", os.environ.get("NVIDIA_API_KEY"), "nvidia/nemotron-3-super-120b-a12b"
     if not key: raise RuntimeError("AI provider key is not configured")
     payload = json.dumps({"model": model, "messages": [{"role":"system","content":system},{"role":"user","content":user}], "temperature":0.35, "max_tokens":max_tokens, "stream":False}).encode()
@@ -45,7 +46,7 @@ def call_ai(system, user, max_tokens=6000):
         failure = error
         if attempt < 3: time.sleep(2 ** attempt)
     try:
-        if not agnes or endpoint.startswith("https://integrate.api.nvidia.com"): raise failure
+        if not (agnes or cohere) or endpoint.startswith("https://integrate.api.nvidia.com"): raise failure
         fallback_key = os.environ.get("NVIDIA_API_KEY")
         if not fallback_key: raise
         fallback = json.dumps({"model":"nvidia/nemotron-3-super-120b-a12b","messages":[{"role":"system","content":system},{"role":"user","content":user}],"temperature":0.35,"max_tokens":max_tokens,"stream":False}).encode()

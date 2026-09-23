@@ -16,6 +16,7 @@ jobs:
     env:
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
+      COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
       JOB_ID: ${{ github.event.client_payload.id }}
       KIND: ${{ github.event.client_payload.kind }}
       PROMPT: ${{ github.event.client_payload.prompt }}

@@ -34,11 +34,13 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
           WORKAI_GITHUB_TOKEN: ${{ secrets.WORKAI_GITHUB_TOKEN }}
           WORKAI_DEVICE_TOKEN: ${{ secrets.WORKAI_DEVICE_TOKEN }}
         run: |
           printf '%s' "$NVIDIA_API_KEY" | npx wrangler secret put NVIDIA_API_KEY
           if [ -n "$AGNES_API_KEY" ]; then printf '%s' "$AGNES_API_KEY" | npx wrangler secret put AGNES_API_KEY; fi
+          if [ -n "$COHERE_API_KEY" ]; then printf '%s' "$COHERE_API_KEY" | npx wrangler secret put COHERE_API_KEY; fi
           printf '%s' "$WORKAI_GITHUB_TOKEN" | npx wrangler secret put WORKAI_GITHUB_TOKEN
           printf '%s' "$WORKAI_DEVICE_TOKEN" | npx wrangler secret put WORKAI_DEVICE_TOKEN
       - name: Verify deployment
