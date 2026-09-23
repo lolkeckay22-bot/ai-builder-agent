@@ -374,8 +374,21 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
     Surface(color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 12.dp, vertical = 8.dp).navigationBarsPadding()) {
             if(ui.error!=null) Text(ui.error,Modifier.padding(horizontal=12.dp,vertical=4.dp),color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.labelSmall)
-            if (ui.attachments.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                ui.attachments.take(3).forEach { file -> InputChip(selected = true, onClick = { vm.removeAttachment(file.name) }, label = { Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis) }, trailingIcon = { Icon(Icons.Default.Close, "Убрать", Modifier.size(15.dp)) }, modifier = Modifier.widthIn(max = 150.dp)) }
+            if (ui.attachments.isNotEmpty()) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ui.attachments.forEach { file ->
+                    val progress=ui.uploadProgress[file.id]
+                    val failure=ui.uploadErrors[file.id]
+                    InputChip(selected=true,onClick={if(failure!=null)vm.retryUpload(file.id) else vm.removeAttachment(file.id)},label={
+                        Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                            when {
+                                progress!=null -> Box(Modifier.size(24.dp),contentAlignment=Alignment.Center){CircularProgressIndicator(progress={progress/100f},modifier=Modifier.fillMaxSize(),strokeWidth=2.dp);Text("$progress",style=MaterialTheme.typography.labelSmall)}
+                                failure!=null -> Icon(Icons.Default.Refresh,"Повторить загрузку",Modifier.size(18.dp),tint=MaterialTheme.colorScheme.error)
+                                else -> Icon(Icons.Default.CheckCircle,"Загружено",Modifier.size(18.dp),tint=Color(0xFF69BF94))
+                            }
+                            Text(file.name,maxLines=1,overflow=TextOverflow.Ellipsis)
+                        }
+                    },trailingIcon={Icon(Icons.Default.Close,"Убрать",Modifier.size(15.dp))},modifier=Modifier.widthIn(max=230.dp))
+                }
             }
             Surface(shape=RoundedCornerShape(28.dp),color=Color(0xFF242424),modifier=Modifier.fillMaxWidth()){
                 Column(Modifier.padding(horizontal=8.dp,vertical=5.dp)){
@@ -394,7 +407,7 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
                             Icon(Icons.Default.KeyboardArrowDown,null,Modifier.size(17.dp),tint=Accent)
                         }
                         Spacer(Modifier.weight(1f))
-                        val canSend=running||ui.input.isNotBlank()||ui.attachments.isNotEmpty()
+                        val canSend=running||((ui.input.isNotBlank()||ui.attachments.isNotEmpty())&&ui.attachments.none{it.id in ui.uploadProgress||it.id in ui.uploadErrors})
                         Surface(shape=CircleShape,color=if(canSend)Accent else Color(0xFF3B3B3B),modifier=Modifier.size(40.dp).pointerInput(canSend,running){detectTapGestures(onTap={if(canSend){if(running)vm.stop() else vm.send()}},onLongPress={if(!running)reasoningOpen=true})}){Box(contentAlignment=Alignment.Center){Icon(if(running)Icons.Default.Stop else Icons.Default.ArrowUpward,if(running)"Остановить" else "Отправить",tint=if(canSend)Color.White else Color(0xFF8A8A8A))}}
                     }
                 }

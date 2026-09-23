@@ -1,5 +1,30 @@
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
+export class JobEvents {
+  constructor(ctx){this.ctx=ctx;}
+  async fetch(request){
+    const events=await this.ctx.storage.get("events")||[];
+    if(request.method==="GET"){
+      const after=Math.max(0,Number(new URL(request.url).searchParams.get("after"))||0);
+      return json({events:events.filter(event=>event.seq>after),last_seq:events.at(-1)?.seq||0});
+    }
+    if(request.method==="POST"){
+      const payload=await request.json();const type=String(payload.type||"").slice(0,80);
+      if(!/^(todo\.(created|updated)|tool\.(started|progress|completed|failed)|file\.(read|write)|assistant\.message|final\.answer)$/.test(type))return json({error:"invalid_event"},400);
+      const event={...payload,type,seq:(events.at(-1)?.seq||0)+1,at:Date.now()};
+      if(JSON.stringify(event).length>12000)return json({error:"event_too_large"},413);
+      events.push(event);await this.ctx.storage.put("events",events.slice(-300));
+      return json({seq:event.seq},201);
+    }
+    return json({error:"method_not_allowed"},405);
+  }
+}
+
+function eventStore(env,id){
+  if(!env.JOB_EVENTS)throw new Error("JOB_EVENTS binding is not configured");
+  return env.JOB_EVENTS.get(env.JOB_EVENTS.idFromName(id));
+}
+
 function json(data, status = 200, extra = {}) {
   return new Response(JSON.stringify(data), { status, headers: { ...JSON_HEADERS, ...extra } });
 }
@@ -52,6 +77,44 @@ function decodeBase64(value) {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
+}
+
+function encodeBase64(bytes) {
+  let binary="";
+  for(let i=0;i<bytes.length;i+=32768) binary+=String.fromCharCode(...bytes.subarray(i,i+32768));
+  return btoa(binary);
+}
+
+async function hydrateAttachments(env,messages,model) {
+  const output=[];
+  for(const message of messages){
+    const items=Array.isArray(message.attachments)?message.attachments:[];
+    if(!items.length){output.push(message);continue;}
+    if(message.role!=="user")throw new Error("Attachments are only accepted on user messages");
+    if(!VISION_MODELS.has(model))throw new Error(`Model ${model} does not support image input`);
+    if(items.length>4)throw new Error("Too many images (maximum 4)");
+    const parts=[{type:"text",text:String(message.content||"")}];
+    for(const item of items){
+      const mime=String(item.mime||"").toLowerCase();
+      if(!["image/png","image/jpeg","image/webp"].includes(mime))throw new Error(`Unsupported image format: ${mime}`);
+      const expectedSize=Number(item.size);
+      const chunks=item.chunks;
+      if(!Number.isSafeInteger(expectedSize)||expectedSize<1||expectedSize>8*1024*1024||!Array.isArray(chunks)||chunks.length<1||chunks.length>4)throw new Error("Invalid image reference");
+      const combined=new Uint8Array(expectedSize);let offset=0;
+      for(const [index,chunk] of chunks.entries()){
+        if(!/^[0-9a-f]{40}$/.test(chunk.sha)||chunk.index!==index||!Number.isSafeInteger(chunk.size)||chunk.size<1||chunk.size>5*1024*1024)throw new Error("Invalid image chunk");
+        const response=await github(env,`/git/blobs/${chunk.sha}`);
+        if(!response.ok)throw new Error(`Image download ${response.status}`);
+        const blob=await response.json();const data=decodeBase64(String(blob.content||"").replace(/\s/g,""));
+        if(data.length!==chunk.size||await sha256Hex(data)!==chunk.sha256||offset+data.length>combined.length)throw new Error("Image chunk integrity mismatch");
+        combined.set(data,offset);offset+=data.length;
+      }
+      if(offset!==expectedSize||await sha256Hex(combined)!==item.sha256)throw new Error("Image integrity mismatch");
+      parts.push({type:"image_url",image_url:{url:`data:${mime};base64,${encodeBase64(combined)}`}});
+    }
+    output.push({role:"user",content:parts});
+  }
+  return output;
 }
 
 function safeHttpUrl(value) {
@@ -220,6 +283,7 @@ async function relayProvider(upstream, send, turn, allowContentTerminated=false)
 const CHAT_TOOLS=[
   {type:"function",function:{name:"get_exchange_rate",description:"Получить актуальный официальный курс валют. Используй для текущего курса валют вместо общего веб-поиска.",parameters:{type:"object",properties:{base:{type:"string",description:"Базовая валюта, например USD"},quote:{type:"string",description:"Валюта котировки, например UAH"}},required:["base","quote"]}}},
   {type:"function",function:{name:"web_search",description:"Искать актуальные сведения в интернете, в том числе прогноз погоды. Если фрагментов мало, открой найденную страницу.",parameters:{type:"object",properties:{query:{type:"string"}},required:["query"]}}},
+  {type:"function",function:{name:"open_url",description:"Открыть HTTPS-результат поиска и получить читаемый текст страницы.",parameters:{type:"object",properties:{url:{type:"string"}},required:["url"]}}},
   {type:"function",function:{name:"read_page",description:"Прочитать содержимое найденной HTTPS-страницы.",parameters:{type:"object",properties:{url:{type:"string"}},required:["url"]}}},
   {type:"function",function:{name:"find_on_page",description:"Найти текст на HTTPS-странице и прочитать окружающий фрагмент.",parameters:{type:"object",properties:{url:{type:"string"},query:{type:"string"}},required:["url","query"]}}}
 ];
@@ -234,7 +298,7 @@ async function executeChatTool(call,send){
     const query=String(args.query||"").trim().slice(0,300);send({type:"tool_call",id:call.id,name,label:`Поиск «${query}»`,icon:"search"});
     try{const results=await webSearch(query);const sources=results.map(r=>{const u=new URL(r.url);return {url:r.url,title:r.title||u.hostname,domain:u.hostname.replace(/^www\./,""),snippet:r.snippet,favicon:`${u.origin}/favicon.ico`}});send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Найдено результатов: ${results.length}`,icon:"search"});return {result:JSON.stringify({ok:true,query,results}),sources};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Поиск не выполнен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
   }
-  if(name==="read_page"||name==="find_on_page"){
+  if(name==="open_url"||name==="read_page"||name==="find_on_page"){
     const url=safeHttpUrl(String(args.url||""));send({type:"tool_call",id:call.id,name,label:`Читаю страницу: ${url?.hostname||"некорректный URL"}`,icon:"web"});
     try{
       if(!url)throw new Error("invalid_https_url");
@@ -269,7 +333,7 @@ function executionStream(env, body, model, messages, custom) {
         const upstream=await nvidiaStream(env,history,model,String(body.reasoning_effort||""),CHAT_TOOLS);
         const generated=await relayProvider(upstream,send,turn,ZEN_RESPONSES_MODELS.has(model));
         const assistant={role:"assistant",content:generated.content||null};if(generated.toolCalls.length)assistant.tool_calls=generated.toolCalls;history.push(assistant);
-        if(!generated.toolCalls.length){finalText=generated.content.trim();if(!finalText){emptyTurns++;if(emptyTurns<2){history.push({role:"user",content:"Ты завершил ход без ответа. Продолжи: используй уже полученные tool results и сформируй содержательный финальный ответ пользователю. Не вызывай повторно тот же поиск без изменения запроса."});continue}const fallback=await nvidia(env,[...history,{role:"user",content:"Сформируй финальный ответ по истории и результатам инструментов. Если данных недостаточно, конкретно объясни это и предложи полезный следующий шаг."}],2048,0.35);finalText=fallback.trim()||"Не удалось получить содержательный ответ от выбранной модели. Попробуйте повторить запрос или выбрать другую модель.";}send({type:"text_delta",delta:finalText});finished=true;break;}
+        if(!generated.toolCalls.length){finalText=generated.content.trim();if(!finalText){emptyTurns++;if(emptyTurns<2){history.push({role:"user",content:"Ты завершил ход без ответа. Продолжи: используй уже полученные tool results и сформируй содержательный финальный ответ пользователю. Не вызывай повторно тот же поиск без изменения запроса."});continue}const fallback=await nvidia(env,[...history,{role:"user",content:"Сформируй финальный ответ по истории и результатам инструментов. Если данных недостаточно, конкретно объясни это и предложи полезный следующий шаг."}],2048,0.35,model);finalText=fallback.trim();if(!finalText)throw new Error("selected_model_returned_empty_answer");}send({type:"text_delta",delta:finalText});finished=true;break;}
         if(generated.content.trim())send({type:"intermediate",text:generated.content.trim(),turn});
         for(const call of generated.toolCalls){const executed=await executeChatTool(call,send);history.push({role:"tool",tool_call_id:call.id,name:call.function.name,content:executed.result});toolMemory.push(`${call.function.name}: ${executed.result}`);allSources.push(...executed.sources);}
       }
@@ -304,11 +368,13 @@ function parseJsonObject(text) {
 
 async function createPlan(env, prompt, kind, model) {
   const raw = await nvidia(env, [
-    { role: "system", content: "Ты планировщик WorkAI. Верни только JSON без markdown: {\"reasoning_summary\":\"краткое фактическое резюме выбранного подхода и почему нужны указанные инструменты\",\"intro\":\"что именно ты сделаешь, одной естественной фразой без заявления об успехе\",\"skills\":[\"название подходящего навыка\"],\"tasks\":[\"...\"]}. Указывай только действительно подходящие навыки из file-creator, file-analysis, archive-editor, mtz-editor, android-app-builder. Никогда не выбирай web-research для создания файлов. Нужно 3-7 конкретных проверяемых этапов. Последние этапы: сборка, проверка, публикация файла." },
+    { role: "system", content: "Ты планировщик WorkAI. Верни только JSON без markdown: {\"skills\":[\"название подходящего навыка\"],\"tasks\":[{\"title\":\"конкретное действие для задачи\",\"phase\":\"inspect|modify|build|verify|publish\"}]}. Указывай только подходящие навыки из file-creator, file-analysis, archive-editor, mtz-editor, android-app-builder. Выбирай только необходимые этапы, 2-7 задач, не повторяй phase. Этапы должны отражать конкретный запрос, а phase связывает каждый пункт с реальным действием. Заверши план фазами verify и publish. Не выдумывай выполненных действий." },
     { role: "user", content: `Тип результата: ${kind}. Задача: ${prompt}` },
   ], 900, 0.25, model);
   const parsed = parseJsonObject(raw);
-  const tasks = Array.isArray(parsed?.tasks) ? parsed.tasks.map(String).filter(Boolean).slice(0, 7) : [];
+  const phases=new Set(["inspect","modify","build","verify","publish"]);
+  const tasks=Array.isArray(parsed?.tasks)?parsed.tasks.filter(t=>t&&typeof t.title==="string"&&t.title.trim()&&phases.has(t.phase)).map(t=>({title:t.title.trim().slice(0,160),phase:t.phase})).slice(0,7):[];
+  if(new Set(tasks.map(t=>t.phase)).size!==tasks.length)throw new Error("model_plan_duplicate_phases");
   if(!tasks.length)throw new Error("model_plan_missing_tasks");
   return {reasoningSummary:String(parsed?.reasoning_summary||"").trim(),intro:String(parsed?.intro||""),skills:Array.isArray(parsed?.skills)?parsed.skills.map(String).filter(Boolean).filter(x=>x!=="web-research").slice(0,4):[],tasks};
 }
@@ -322,6 +388,7 @@ async function startJob(request, env, url) {
   const id = crypto.randomUUID();
   const plan = await createPlan(env, prompt, kind, body.model);
   const tasks = plan.tasks;
+  const eventLog=eventStore(env,id);
   const attachments = [];
   for (const item of (Array.isArray(body.attachments) ? body.attachments : []).slice(0, 8)) {
     const name = String(item?.name || "file.bin").replace(/[^\p{L}\p{N}._ -]/gu, "_").slice(0, 120);
@@ -333,12 +400,13 @@ async function startJob(request, env, url) {
     if (size < 1 || size > 100 * 1024 * 1024 || chunks.reduce((sum, c) => sum + c.size, 0) !== size || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error(`invalid_attachment_integrity:${name}`);
     attachments.push({ name, mime, chunks, size, sha256 });
   }
+  await eventLog.fetch(new Request(`https://events.internal/${id}`,{method:"POST",body:JSON.stringify({type:"todo.created",tasks})}));
   const dispatch = await github(env, "/dispatches", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       event_type: "workai_build",
-      client_payload: { id, prompt, kind, tasks, attachments, model: validateModel(body.model,env), reasoning_effort: String(body.reasoning_effort || ""), system_prompt: String(body.system_prompt || "").slice(0, 8000), callback_origin: url.origin },
+      client_payload: { id, prompt, kind, tasks, skills:plan.skills, attachments, model: validateModel(body.model,env), reasoning_effort: String(body.reasoning_effort || ""), system_prompt: String(body.system_prompt || "").slice(0, 8000), callback_origin: url.origin },
     }),
   });
   if (!dispatch.ok) return json({ error: "dispatch_failed", detail: (await dispatch.text()).slice(0, 500) }, 502, cors(request));
@@ -371,7 +439,9 @@ async function jobStatus(request, env, id) {
       if (asset) artifact = { name: asset.name, size: asset.size, download: `/v1/jobs/${id}/download` };
     }
   }
-  return json({ id, status: run.status, conclusion: run.conclusion, runUrl: run.html_url, steps, artifact }, 200, cors(request));
+  const eventResponse=await eventStore(env,id).fetch(new Request(`https://events.internal/${id}`));
+  const eventLog=await eventResponse.json();
+  return json({ id, status: run.status, conclusion: run.conclusion, runUrl: run.html_url, steps, artifact, events:eventLog.events }, 200, cors(request));
 }
 
 async function downloadResult(request, env, id) {
@@ -399,11 +469,6 @@ async function downloadResult(request, env, id) {
   });
 }
 
-async function reviewJob(request,env,id){
-  const body=await request.json(),artifact=String(body.artifact||"файл"),prompt=String(body.prompt||"").slice(0,6000),model=validateModel(body.model,env);
-  const summary=await nvidia(env,[{role:"system",content:"Ты проверяющий агент WorkAI. Сформулируй одним коротким абзацем реальное резюме проверки уже завершённой задачи: что было проверено перед выдачей результата. Не выдумывай детали, которых нет во входных данных, и не заявляй о незавершённых действиях."},{role:"user",content:`Задача: ${prompt}\nGitHub Actions завершился успешно. Опубликован и найден артефакт: ${artifact}. Архив/сборка прошли встроенную проверку workflow.`}],500,0.2,model);
-  return json({id,reasoning_summary:summary.trim()},200,cors(request));
-}
 
 export default {
   async fetch(request, env) {
@@ -415,7 +480,7 @@ export default {
       if (url.pathname === "/v1/chat" && request.method === "POST") {
         const body = await request.json();
         const model = validateModel(body.model,env);
-        const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
+        const messages = await hydrateAttachments(env,Array.isArray(body.messages) ? body.messages.slice(-30) : [],model);
         if(messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==="image_url"))&&!VISION_MODELS.has(model))throw new Error(`Model ${model} does not support image input`);
         const answer = await nvidia(env, [{ role: "system", content: `Ты WorkAI, точный русскоязычный ассистент. Текущая модель: ${model}. Если тебя спрашивают о модели, назови именно её.` }, ...messages], 2048, 0.45, model);
         return json({ answer, model }, 200, cors(request));
@@ -423,7 +488,7 @@ export default {
       if (url.pathname === "/v1/chat/stream" && request.method === "POST") {
         const body = await request.json();
         const model = validateModel(body.model,env);
-        const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
+        const messages = await hydrateAttachments(env,Array.isArray(body.messages) ? body.messages.slice(-30) : [],model);
         if(messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==="image_url"))&&!VISION_MODELS.has(model))throw new Error(`Model ${model} does not support image input`);
         const custom = String(body.system_prompt || "").trim().slice(0, 8000);
         return new Response(executionStream(env,body,model,messages,custom), { status: 200, headers: { ...cors(request), "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "x-accel-buffering": "no" } });
@@ -438,9 +503,14 @@ export default {
         return json({sha:(await created.json()).sha,sha256:actual,size:bytes.byteLength,index:Number(body.index || 0)},201,cors(request));
       }
       if (url.pathname === "/v1/jobs" && request.method === "POST") return await startJob(request, env, url);
+      const eventPath=url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)\/events$/);
+      if(eventPath && (request.method==="GET"||request.method==="POST")){
+        const store=eventStore(env,eventPath[1]);
+        const response=await store.fetch(new Request(`https://events.internal/${eventPath[1]}${url.search}`,{method:request.method,...(request.method==="POST"?{body:await request.text()}: {})}));
+        return new Response(response.body,{status:response.status,headers:{...cors(request),...JSON_HEADERS}});
+      }
       const match = url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)(\/download)?$/);
       if (match && request.method === "GET") return match[2] ? await downloadResult(request, env, match[1]) : await jobStatus(request, env, match[1]);
-      const review=url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)\/review$/);if(review&&request.method==="POST")return await reviewJob(request,env,review[1]);
       return json({ error: "not_found" }, 404, cors(request));
     } catch (error) {
       return json({ error: "internal_error", detail: String(error?.message || error).slice(0, 700) }, 500, cors(request));
