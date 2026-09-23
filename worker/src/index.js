@@ -25,7 +25,14 @@ const ALLOWED_MODELS = new Set([
   "agnes-2.5-flash",
   "agnes-3.0-flash",
   "north-mini-code-1-0",
+  "nemotron-3-ultra-free",
+  "mimo-v2.6-flash-free",
+  "muse-spark-1.3-contributor-free",
+  "muse-spark-1.2-contributor-free",
 ]);
+const ZEN_MODELS=new Set(["nemotron-3-ultra-free","mimo-v2.6-flash-free","muse-spark-1.3-contributor-free","muse-spark-1.2-contributor-free"]);
+const ZEN_RESPONSES_MODELS=new Set(["muse-spark-1.3-contributor-free","muse-spark-1.2-contributor-free"]);
+function responsesInput(messages){const input=[];for(const m of messages){if(m.role==="tool"){input.push({type:"function_call_output",call_id:m.tool_call_id,output:String(m.content||"")});continue}if(m.tool_calls){if(m.content)input.push({role:m.role,content:m.content});for(const c of m.tool_calls)input.push({type:"function_call",call_id:c.id,name:c.function?.name||"",arguments:c.function?.arguments||"{}"});continue}input.push({role:m.role,content:m.content??""})}return input}
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -150,11 +157,11 @@ async function researchContext(env, messages, emit = () => {}) {
 
 async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, requestedModel) {
   const selected=ALLOWED_MODELS.has(requestedModel)?requestedModel:(env.NVIDIA_MODEL||"nvidia/nemotron-3-super-120b-a12b");
-  const agnes=selected.startsWith("agnes-"),cohere=selected==="north-mini-code-1-0";
+  const agnes=selected.startsWith("agnes-"),cohere=selected==="north-mini-code-1-0",zen=ZEN_MODELS.has(selected),responses=ZEN_RESPONSES_MODELS.has(selected);
   const model=agnes?(env.NVIDIA_MODEL||"nvidia/nemotron-3-super-120b-a12b"):selected;
-  const endpoint=cohere?"https://api.cohere.com/compatibility/v1/chat/completions":"https://integrate.api.nvidia.com/v1/chat/completions";
-  const apiKey=cohere?env.COHERE_API_KEY:env.NVIDIA_API_KEY;
-  if(!apiKey)throw new Error(`${cohere?"COHERE":"NVIDIA"}_API_KEY is not configured`);
+  const endpoint=responses?"https://opencode.ai/zen/v1/responses":zen?"https://opencode.ai/zen/v1/chat/completions":cohere?"https://api.cohere.com/compatibility/v1/chat/completions":"https://integrate.api.nvidia.com/v1/chat/completions";
+  const apiKey=zen?env.OPENCODE_API_KEY:cohere?env.COHERE_API_KEY:env.NVIDIA_API_KEY;
+  const provider=zen?"OPENCODE":cohere?"COHERE":"NVIDIA";if(!apiKey)throw new Error(`${provider}_API_KEY is not configured`);
   let lastStatus = 0;
   let lastText = "";
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -167,13 +174,13 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
           "content-type": "application/json",
           "accept": "application/json",
         },
-        body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens, stream: false }),
+        body: JSON.stringify(responses?{model,input:responsesInput(messages),max_output_tokens:maxTokens,stream:false}:{model,messages,temperature,max_tokens:maxTokens,stream:false}),
       });
       lastStatus = response.status;
       lastText = await response.text();
       if (response.ok) {
         const data = JSON.parse(lastText);
-        return data.choices?.[0]?.message?.content?.trim() || "";
+        return String(responses?(data.output_text||data.output?.flatMap(x=>x.content||[]).map(x=>x.text||"").join("")):data.choices?.[0]?.message?.content||"").trim();
       }
       if (![408, 429, 500, 502, 503, 504].includes(response.status)) break;
       const retryAfter = Number(response.headers.get("retry-after"));
@@ -185,16 +192,16 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
       await sleep(700 * (2 ** attempt));
     }
   }
-  throw new Error(`${cohere?"Cohere":"NVIDIA"} ${lastStatus || "network"}: ${lastText.slice(0, 300)}`);
+  throw new Error(`${zen?"OpenCode Zen":cohere?"Cohere":"NVIDIA"} ${lastStatus || "network"}: ${lastText.slice(0, 300)}`);
 }
 
 async function nvidiaStream(env, messages, requestedModel, requestedEffort, tools = []) {
   const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : (env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b");
-  const agnes = model.startsWith("agnes-");
+  const agnes = model.startsWith("agnes-"),zen=ZEN_MODELS.has(model),responses=ZEN_RESPONSES_MODELS.has(model);
   const cohere = model === "north-mini-code-1-0";
-  const endpoint = cohere ? "https://api.cohere.com/compatibility/v1/chat/completions" : agnes ? "https://apihub.agnes-ai.com/v1/chat/completions" : "https://integrate.api.nvidia.com/v1/chat/completions";
-  const apiKey = cohere ? env.COHERE_API_KEY : agnes ? env.AGNES_API_KEY : env.NVIDIA_API_KEY;
-  const provider=cohere?"Cohere":agnes?"Agnes":"NVIDIA";
+  const endpoint = responses?"https://opencode.ai/zen/v1/responses":zen?"https://opencode.ai/zen/v1/chat/completions":cohere ? "https://api.cohere.com/compatibility/v1/chat/completions" : agnes ? "https://apihub.agnes-ai.com/v1/chat/completions" : "https://integrate.api.nvidia.com/v1/chat/completions";
+  const apiKey = zen?env.OPENCODE_API_KEY:cohere ? env.COHERE_API_KEY : agnes ? env.AGNES_API_KEY : env.NVIDIA_API_KEY;
+  const provider=zen?"OpenCode Zen":cohere?"Cohere":agnes?"Agnes":"NVIDIA";
   if(!apiKey)throw new Error(`${provider}_API_KEY is not configured`);
   const allowed = model.includes("ultra") ? new Set(["none", "medium", "high"]) : new Set(["none", "low", "high"]);
   const reasoningEffort = allowed.has(requestedEffort) ? requestedEffort : (model.includes("ultra") ? "medium" : "low");
@@ -203,7 +210,7 @@ async function nvidiaStream(env, messages, requestedModel, requestedEffort, tool
     let response;
     try{response = await fetch(endpoint, {
       method: "POST",headers: { "authorization": `Bearer ${apiKey}`, "content-type": "application/json", "accept": "text/event-stream" },
-      body: JSON.stringify({ model, messages, temperature: 0.45, max_tokens: 4096, stream: true, ...(tools.length?{tools,tool_choice:"auto"}:{}), ...((agnes||cohere)?{}:{reasoning_effort: reasoningEffort}) }),
+      body: JSON.stringify(responses?{model,input:responsesInput(messages),max_output_tokens:4096,stream:true,...(tools.length?{tools:tools.map(t=>({type:"function",name:t.function.name,description:t.function.description,parameters:t.function.parameters})),tool_choice:"auto"}:{})}:{ model, messages, temperature: 0.45, max_tokens: 4096, stream: true, ...(tools.length?{tools,tool_choice:"auto"}:{}), ...((agnes||cohere||zen)?{}:{reasoning_effort: reasoningEffort}) }),
     });}catch(error){lastText=String(error?.message||error);if(attempt<4){await sleep(Math.min(700*(2**attempt),9000));continue}throw new Error(`${provider} network: ${lastText.slice(0,300)}`);}
     if (response.ok) return response;
     lastText = await response.text();
@@ -214,7 +221,7 @@ async function nvidiaStream(env, messages, requestedModel, requestedEffort, tool
   throw new Error(`${provider} overloaded: ${lastText.slice(0,300)}`);
 }
 
-async function relayProvider(upstream, send, turn) {
+async function relayProvider(upstream, send, turn, allowContentTerminated=false) {
     const reader=upstream.body.getReader();
     const decoder=new TextDecoder();let buffer="",completed=false,content="",reasoningSeen=false;const calls=[];
     try{
@@ -226,6 +233,15 @@ async function relayProvider(upstream, send, turn) {
             if(!line.startsWith("data:"))continue;const raw=line.slice(5).trim();
             if(raw==="[DONE]"){completed=true;continue}
             let packet;try{packet=JSON.parse(raw)}catch{continue}
+            if(packet.type?.startsWith("response.")){
+              if(packet.type==="response.output_text.delta"&&packet.delta)content+=String(packet.delta);
+              if((packet.type==="response.reasoning_summary_text.delta"||packet.type==="response.reasoning_text.delta")&&packet.delta){if(!reasoningSeen){send({type:"thinking_start",turn});reasoningSeen=true}send({type:"thinking_delta",turn,delta:String(packet.delta)});}
+              if(packet.type==="response.output_item.added"&&packet.item?.type==="function_call"){calls.push({id:packet.item.call_id||packet.item.id||crypto.randomUUID(),itemId:packet.item.id,type:"function",function:{name:packet.item.name||"",arguments:packet.item.arguments||""}});}
+              if(packet.type==="response.function_call_arguments.delta"){const call=calls.find(x=>x.itemId===packet.item_id)||calls.at(-1);if(call)call.function.arguments+=String(packet.delta||"");}
+              if(packet.type==="response.completed")completed=true;
+              if(packet.type==="response.failed"||packet.type==="error")throw new Error(packet.response?.error?.message||packet.error?.message||"provider_response_failed");
+              continue;
+            }
             const choice=packet.choices?.[0]||{},delta=choice.delta||{};
             const thinking=delta.reasoning_content||delta.reasoning||delta.thinking||"";
             const rawText=delta.content??choice.message?.content??packet.token??"";const text=Array.isArray(rawText)?rawText.map(x=>x?.text||x?.content||"").join(""):rawText;
@@ -240,7 +256,7 @@ async function relayProvider(upstream, send, turn) {
         }
         if(done)break;
       }
-      if(!completed)throw new Error("provider_stream_ended_without_completion");
+      if(!completed&&!(allowContentTerminated&&(content.trim()||calls.length)))throw new Error("provider_stream_ended_without_completion");
       return {content,toolCalls:calls.filter(Boolean).map(call=>({...call,id:call.id||crypto.randomUUID()})),reasoningSeen};
     }catch(error){throw error}
 }
@@ -280,7 +296,7 @@ function executionStream(env, body, model, messages, custom) {
       for(let turn=1;turn<=8&&!finished;turn++){
         send({type:"model_turn_start",turn});
         const upstream=await nvidiaStream(env,history,model,String(body.reasoning_effort||""),CHAT_TOOLS);
-        const generated=await relayProvider(upstream,send,turn);
+        const generated=await relayProvider(upstream,send,turn,ZEN_RESPONSES_MODELS.has(model));
         const assistant={role:"assistant",content:generated.content||null};if(generated.toolCalls.length)assistant.tool_calls=generated.toolCalls;history.push(assistant);
         if(!generated.toolCalls.length){finalText=generated.content.trim();if(!finalText){emptyTurns++;if(emptyTurns<2){history.push({role:"user",content:"Ты завершил ход без ответа. Продолжи: используй уже полученные tool results и сформируй содержательный финальный ответ пользователю. Не вызывай повторно тот же поиск без изменения запроса."});continue}const fallback=await nvidia(env,[...history,{role:"user",content:"Сформируй финальный ответ по истории и результатам инструментов. Если данных недостаточно, конкретно объясни это и предложи полезный следующий шаг."}],2048,0.35);finalText=fallback.trim()||"Не удалось получить содержательный ответ от выбранной модели. Попробуйте повторить запрос или выбрать другую модель.";}send({type:"text_delta",delta:finalText});finished=true;break;}
         if(generated.content.trim())send({type:"intermediate",text:generated.content.trim(),turn});
