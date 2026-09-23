@@ -66,7 +66,7 @@ def fetch_attachments():
 def call_ai(system, user, max_tokens=6000):
     agnes = MODEL.startswith("agnes-")
     cohere = MODEL == "north-mini-code-1-0"
-    zen = MODEL in {"nemotron-3-ultra-free","mimo-v2.6-flash-free","muse-spark-1.3-contributor-free","muse-spark-1.2-contributor-free"}
+    zen = MODEL in {"nemotron-3-ultra-free","mimo-v2.6-flash-free","muse-spark-1.3-contributor-free"}
     responses = MODEL.startswith("muse-spark-")
     endpoint = "https://opencode.ai/zen/v1/responses" if responses else "https://opencode.ai/zen/v1/chat/completions" if zen else "https://api.cohere.com/compatibility/v1/chat/completions" if cohere else "https://apihub.agnes-ai.com/v1/chat/completions" if agnes else "https://integrate.api.nvidia.com/v1/chat/completions"
     key = os.environ.get("OPENCODE_API_KEY") if zen else os.environ.get("COHERE_API_KEY") if cohere else os.environ.get("AGNES_API_KEY") if agnes else os.environ.get("NVIDIA_API_KEY")
@@ -82,6 +82,12 @@ def call_ai(system, user, max_tokens=6000):
       try:
         with urllib.request.urlopen(req, timeout=180) as response:
             data=json.load(response)
+            if responses:
+                reasoning="\n".join(part.get("text","") for item in data.get("output",[]) if item.get("type")=="reasoning" for part in item.get("summary",[]))
+            else:
+                reasoning=data.get("choices",[{}])[0].get("message",{}).get("reasoning_content","")
+            if isinstance(reasoning,str) and reasoning.strip():
+                emit_event("model.thinking",text=reasoning[:10000])
             answer=(data.get("output_text") or "".join(part.get("text","") for item in data.get("output",[]) for part in item.get("content",[]))) if responses else data["choices"][0]["message"]["content"]
             emit_event("tool.completed",name="model.request",label=f"Получен ответ {MODEL}",icon="code")
             return answer

@@ -10,7 +10,7 @@ export class JobEvents {
     }
     if(request.method==="POST"){
       const payload=await request.json();const type=String(payload.type||"").slice(0,80);
-      if(!/^(todo\.(created|updated)|tool\.(started|progress|completed|failed)|file\.(read|write)|assistant\.message|final\.answer)$/.test(type))return json({error:"invalid_event"},400);
+      if(!/^(todo\.(created|updated)|tool\.(started|progress|completed|failed)|file\.(read|write)|model\.thinking|assistant\.message|final\.answer|task\.cancelled)$/.test(type))return json({error:"invalid_event"},400);
       const event={...payload,type,seq:(events.at(-1)?.seq||0)+1,at:Date.now()};
       if(JSON.stringify(event).length>12000)return json({error:"event_too_large"},413);
       events.push(event);await this.ctx.storage.put("events",events.slice(-300));
@@ -444,6 +444,21 @@ async function jobStatus(request, env, id) {
   return json({ id, status: run.status, conclusion: run.conclusion, runUrl: run.html_url, steps, artifact, events:eventLog.events }, 200, cors(request));
 }
 
+async function cancelJob(request,env,id){
+  let run;
+  for(let attempt=0;attempt<8;attempt++){
+    run=await findRun(env,id);
+    if(run)break;
+    await sleep(750);
+  }
+  if(!run)return json({error:"workflow_not_found",detail:"Сборка ещё не появилась в GitHub Actions"},409,cors(request));
+  if(run.status==="completed")return json({error:"workflow_already_completed",conclusion:run.conclusion},409,cors(request));
+  const response=await github(env,`/actions/runs/${run.id}/cancel`,{method:"POST"});
+  if(!response.ok)return json({error:"cancel_failed",detail:(await response.text()).slice(0,300)},response.status,cors(request));
+  await eventStore(env,id).fetch(new Request(`https://events.internal/${id}`,{method:"POST",body:JSON.stringify({type:"task.cancelled",label:"Отмена сборки запрошена в GitHub Actions"})}));
+  return json({status:"cancellation_requested",run_id:run.id},202,cors(request));
+}
+
 async function downloadResult(request, env, id) {
   const release = await github(env, `/releases/tags/job-${id}`);
   if (!release.ok) return json({ error: "artifact_not_ready" }, 404, cors(request));
@@ -503,6 +518,8 @@ export default {
         return json({sha:(await created.json()).sha,sha256:actual,size:bytes.byteLength,index:Number(body.index || 0)},201,cors(request));
       }
       if (url.pathname === "/v1/jobs" && request.method === "POST") return await startJob(request, env, url);
+      const cancelPath=url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)\/cancel$/);
+      if(cancelPath&&request.method==="POST")return await cancelJob(request,env,cancelPath[1]);
       const eventPath=url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)\/events$/);
       if(eventPath && (request.method==="GET"||request.method==="POST")){
         const store=eventStore(env,eventPath[1]);

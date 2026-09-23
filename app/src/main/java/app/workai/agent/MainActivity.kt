@@ -78,8 +78,7 @@ const val MODEL_ZEN_VISION="deepseek-v4-flash-vision-exp"
 const val MODEL_ZEN_ULTRA="nemotron-3-ultra-free"
 const val MODEL_ZEN_MIMO="mimo-v2.6-flash-free"
 const val MODEL_ZEN_MUSE_13="muse-spark-1.3-contributor-free"
-const val MODEL_ZEN_MUSE_12="muse-spark-1.2-contributor-free"
-val ALL_MODELS=setOf(MODEL_SUPER,MODEL_ULTRA,MODEL_AGNES_25,MODEL_AGNES_30,MODEL_COHERE_NORTH,MODEL_ZEN_VISION,MODEL_ZEN_ULTRA,MODEL_ZEN_MIMO,MODEL_ZEN_MUSE_13,MODEL_ZEN_MUSE_12)
+val ALL_MODELS=setOf(MODEL_SUPER,MODEL_ULTRA,MODEL_AGNES_25,MODEL_AGNES_30,MODEL_COHERE_NORTH,MODEL_ZEN_VISION,MODEL_ZEN_ULTRA,MODEL_ZEN_MIMO,MODEL_ZEN_MUSE_13)
 
 class AgentViewModel(app:Application):AndroidViewModel(app) {
     private val prefs=app.getSharedPreferences("workai",0)
@@ -207,7 +206,18 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
         val result=Regex("(?i)(файл|архив|zip|rar|7z|mtz|apk|docx|txt|pdf|готов(?:ый|ую)|скачать)").containsMatchIn(text)
         return mutation&&(result||files.isNotEmpty())
     }
-    fun stop(){_ui.value.activeId.let{calls.remove(it)?.cancel();jobs[it]?.cancel()}}
+    fun stop(){
+        val id=_ui.value.activeId
+        val jobId=_ui.value.active?.jobId
+        calls.remove(id)?.cancel();jobs[id]?.cancel()
+        if(jobId!=null)viewModelScope.launch(Dispatchers.IO){
+            try{
+                client.newCall(builder("/v1/jobs/$jobId/cancel").post("{}".toRequestBody("application/json".toMediaType())).build()).execute().use{response->
+                    if(!response.isSuccessful)error("Серверная сборка не отменена: HTTP ${response.code} ${response.body?.string()?.take(180)}")
+                }
+            }catch(e:Throwable){withContext(Dispatchers.Main){_ui.value=_ui.value.copy(error=e.message?:"Серверную сборку не удалось отменить")}}
+        }
+    }
 
     private suspend fun runChat(id:String,creationRequest:Boolean=false){
         val chat=_ui.value.conversations.first{it.id==id};val a=JSONArray()
@@ -305,6 +315,7 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
             "todo.created"->{val a=event.optJSONArray("tasks")?:JSONArray();update(id){it.copy(todos=(0 until a.length()).map{index->WorkTodo(a.optJSONObject(index)?.optString("title").orEmpty())})}}
             "todo.updated"->{val index=event.optInt("index",-1);val state=runCatching{TodoState.valueOf(event.optString("state").uppercase())}.getOrNull();if(state!=null)update(id){c->c.copy(todos=c.todos.mapIndexed{i,t->if(i==index)t.copy(state=state) else t})}}
             "tool.started"->appendEvent(id,ExecutionEventType.TOOL,event.optString("label"),event.optString("icon","code"))
+            "model.thinking"->appendEvent(id,ExecutionEventType.THINKING,event.optString("text"),"thinking")
             "tool.completed","file.read","file.write"->appendEvent(id,ExecutionEventType.STATUS,event.optString("label"),event.optString("icon","file"))
             "tool.failed"->appendEvent(id,ExecutionEventType.ERROR,event.optString("label"),"error")
             "assistant.message"->appendEvent(id,ExecutionEventType.TEXT,event.optString("text"),"message")

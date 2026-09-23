@@ -24,6 +24,7 @@ jobs:
         run: |
           node --test worker/test/agent.test.mjs
           python3 -m py_compile builder/generate.py
+          python3 -m unittest discover -s builder -p 'test_*.py'
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug
       - name: Verify APK

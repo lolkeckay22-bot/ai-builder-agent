@@ -85,3 +85,22 @@ test('failed page read returns to the model for recovery',async()=>{
     assert.match(stream,/task_completed/);
   }finally{globalThis.fetch=previous;}
 });
+
+test('cancelling Work Mode requests GitHub workflow cancellation',async()=>{
+  const previous=globalThis.fetch;
+  const id='78c0a7bf-5324-4cd0-9c22-443685a45fd7';
+  const memory=new Map();const {JobEvents}=await import('../src/index.js');
+  const durable=new JobEvents({storage:{get:async key=>memory.get(key),put:async(key,value)=>memory.set(key,value)}});
+  let cancelled=false;
+  globalThis.fetch=async (url,init)=>{
+    if(String(url).includes('/actions/workflows/agent-build.yml/runs'))return new Response(JSON.stringify({workflow_runs:[{id:42,display_title:`WorkAI ${id}`,status:'in_progress'}]}),{status:200});
+    if(String(url).endsWith('/actions/runs/42/cancel')&&init.method==='POST'){cancelled=true;return new Response(null,{status:202});}
+    throw Error(`Unexpected endpoint ${url}`);
+  };
+  try{
+    const config={...env,WORKAI_GITHUB_TOKEN:'github-test',GITHUB_OWNER:'owner',GITHUB_REPO:'repo',JOB_EVENTS:{idFromName:x=>x,get:()=>durable}};
+    const response=await worker.fetch(request({},`/v1/jobs/${id}/cancel`),config);
+    assert.equal(response.status,202);
+    assert.equal(cancelled,true);
+  }finally{globalThis.fetch=previous;}
+});

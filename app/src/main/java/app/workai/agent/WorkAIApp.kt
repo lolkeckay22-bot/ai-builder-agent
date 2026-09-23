@@ -425,9 +425,9 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
         IntelligenceSlider(ui,vm::selectReasoning)
         Text("Модель",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(start=28.dp,bottom=10.dp))
         Column(Modifier.padding(horizontal=20.dp).heightIn(max=390.dp).clip(RoundedCornerShape(24.dp)).background(Color(0xFF414141)).verticalScroll(rememberScrollState())){
-            listOf(MODEL_SUPER,MODEL_ULTRA,MODEL_AGNES_25,MODEL_AGNES_30,MODEL_COHERE_NORTH,MODEL_ZEN_VISION,MODEL_ZEN_ULTRA,MODEL_ZEN_MIMO,MODEL_ZEN_MUSE_13,MODEL_ZEN_MUSE_12).forEach{model->
+            listOf(MODEL_SUPER,MODEL_ULTRA,MODEL_AGNES_25,MODEL_AGNES_30,MODEL_COHERE_NORTH,MODEL_ZEN_VISION,MODEL_ZEN_ULTRA,MODEL_ZEN_MIMO,MODEL_ZEN_MUSE_13).forEach{model->
                 ModelRow(modelTitle(model),modelSubtitle(model),ui.selectedModel==model){vm.selectModel(model)}
-                if(model!=MODEL_ZEN_MUSE_12)HorizontalDivider(color=Color(0xFF252525))
+                if(model!=MODEL_ZEN_MUSE_13)HorizontalDivider(color=Color(0xFF252525))
             }
         }
         Button(onClick={modelsOpen=false},modifier=Modifier.fillMaxWidth().padding(horizontal=28.dp),colors=ButtonDefaults.buttonColors(containerColor=Color.White,contentColor=Color.Black)){Text("Готово",fontWeight=FontWeight.Bold)}
@@ -435,9 +435,9 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
     }
 }
 
-private fun modelShort(model:String)=when(model){MODEL_ULTRA->"Ultra";MODEL_AGNES_25->"Agnes 2.5";MODEL_AGNES_30->"Agnes 3.0";MODEL_COHERE_NORTH->"North Code";MODEL_ZEN_VISION->"Zen Vision";MODEL_ZEN_ULTRA->"Zen Ultra";MODEL_ZEN_MIMO->"Zen MiMo";MODEL_ZEN_MUSE_13->"Muse 1.3";MODEL_ZEN_MUSE_12->"Muse 1.2";else->"Super"}
-private fun modelTitle(model:String)=when(model){MODEL_ULTRA->"Nemotron Ultra 550B";MODEL_AGNES_25->"Agnes 2.5 Flash";MODEL_AGNES_30->"Agnes 3.0 Flash";MODEL_COHERE_NORTH->"Cohere North Mini Code";MODEL_ZEN_VISION->"Zen · DeepSeek Vision";MODEL_ZEN_ULTRA->"Zen · Nemotron 3 Ultra Free";MODEL_ZEN_MIMO->"Zen · MiMo V2.6 Flash Free";MODEL_ZEN_MUSE_13->"Zen · Muse Spark 1.3 Free";MODEL_ZEN_MUSE_12->"Zen · Muse Spark 1.2 Free";else->"Nemotron Super 120B"}
-private fun modelSubtitle(model:String)=when(model){MODEL_ULTRA->"Максимальное качество NVIDIA";MODEL_AGNES_25->"Быстрая агентная модель · 512K";MODEL_AGNES_30->"Новая модель Agnes · доступ зависит от API";MODEL_COHERE_NORTH->"Агентное программирование · 256K";MODEL_ZEN_VISION->"OpenCode Zen · просмотр изображений";MODEL_ZEN_ULTRA,MODEL_ZEN_MIMO,MODEL_ZEN_MUSE_13,MODEL_ZEN_MUSE_12->"OpenCode Zen · бесплатная модель";else->"Быстро и экономно"}
+private fun modelShort(model:String)=when(model){MODEL_ULTRA->"Ultra";MODEL_AGNES_25->"Agnes 2.5";MODEL_AGNES_30->"Agnes 3.0";MODEL_COHERE_NORTH->"North Code";MODEL_ZEN_VISION->"Zen Vision";MODEL_ZEN_ULTRA->"Zen Ultra";MODEL_ZEN_MIMO->"Zen MiMo";MODEL_ZEN_MUSE_13->"Muse 1.3";else->"Super"}
+private fun modelTitle(model:String)=when(model){MODEL_ULTRA->"Nemotron Ultra 550B";MODEL_AGNES_25->"Agnes 2.5 Flash";MODEL_AGNES_30->"Agnes 3.0 Flash";MODEL_COHERE_NORTH->"Cohere North Mini Code";MODEL_ZEN_VISION->"Zen · DeepSeek Vision";MODEL_ZEN_ULTRA->"Zen · Nemotron 3 Ultra Free";MODEL_ZEN_MIMO->"Zen · MiMo V2.6 Flash Free";MODEL_ZEN_MUSE_13->"Zen · Muse Spark 1.3 Free";else->"Nemotron Super 120B"}
+private fun modelSubtitle(model:String)=when(model){MODEL_ULTRA->"Максимальное качество NVIDIA";MODEL_AGNES_25->"Быстрая агентная модель · 512K";MODEL_AGNES_30->"Новая модель Agnes · доступ зависит от API";MODEL_COHERE_NORTH->"Агентное программирование · 256K";MODEL_ZEN_VISION->"OpenCode Zen · просмотр изображений";MODEL_ZEN_ULTRA,MODEL_ZEN_MIMO,MODEL_ZEN_MUSE_13->"OpenCode Zen · бесплатная модель";else->"Быстро и экономно"}
 
 @Composable private fun AttachmentMenuItem(icon:androidx.compose.ui.graphics.vector.ImageVector,title:String,onClick:()->Unit){DropdownMenuItem(text={Text(title,style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)},leadingIcon={Surface(shape=CircleShape,color=Color(0xFF484848),modifier=Modifier.size(44.dp)){Box(contentAlignment=Alignment.Center){Icon(icon,null,Modifier.size(25.dp),tint=Color.White)}}},onClick=onClick,contentPadding=PaddingValues(horizontal=18.dp,vertical=6.dp),modifier=Modifier.height(64.dp))}
 
