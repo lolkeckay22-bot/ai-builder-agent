@@ -36,6 +36,7 @@ jobs:
           AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
           COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
           WORKAI_GITHUB_TOKEN: ${{ secrets.WORKAI_GITHUB_TOKEN }}
           WORKAI_DEVICE_TOKEN: ${{ secrets.WORKAI_DEVICE_TOKEN }}
         run: |
@@ -43,6 +44,7 @@ jobs:
           if [ -n "$AGNES_API_KEY" ]; then printf '%s' "$AGNES_API_KEY" | npx wrangler secret put AGNES_API_KEY; fi
           if [ -n "$COHERE_API_KEY" ]; then printf '%s' "$COHERE_API_KEY" | npx wrangler secret put COHERE_API_KEY; fi
           if [ -n "$OPENCODE_API_KEY" ]; then printf '%s' "$OPENCODE_API_KEY" | npx wrangler secret put OPENCODE_API_KEY; fi
+          if [ -n "$BRAVE_API_KEY" ]; then printf '%s' "$BRAVE_API_KEY" | npx wrangler secret put BRAVE_API_KEY; fi
           printf '%s' "$WORKAI_GITHUB_TOKEN" | npx wrangler secret put WORKAI_GITHUB_TOKEN
           printf '%s' "$WORKAI_DEVICE_TOKEN" | npx wrangler secret put WORKAI_DEVICE_TOKEN
       - name: Verify deployment

@@ -34,9 +34,7 @@ def call_ai(system, user, max_tokens=6000):
     endpoint = "https://opencode.ai/zen/v1/responses" if responses else "https://opencode.ai/zen/v1/chat/completions" if zen else "https://api.cohere.com/compatibility/v1/chat/completions" if cohere else "https://apihub.agnes-ai.com/v1/chat/completions" if agnes else "https://integrate.api.nvidia.com/v1/chat/completions"
     key = os.environ.get("OPENCODE_API_KEY") if zen else os.environ.get("COHERE_API_KEY") if cohere else os.environ.get("AGNES_API_KEY") if agnes else os.environ.get("NVIDIA_API_KEY")
     model = MODEL
-    if (agnes or cohere or zen) and not key:
-        endpoint, key, model = "https://integrate.api.nvidia.com/v1/chat/completions", os.environ.get("NVIDIA_API_KEY"), "nvidia/nemotron-3-super-120b-a12b"
-    if not key: raise RuntimeError("AI provider key is not configured")
+    if not key: raise RuntimeError(f"AI provider key is not configured for model {model} (set the matching *_API_KEY secret; no silent fallback to another provider)")
     messages=[{"role":"system","content":system},{"role":"user","content":user}]
     payload = json.dumps({"model":model,"input":messages,"max_output_tokens":max_tokens,"stream":False} if responses else {"model": model, "messages":messages, "temperature":0.35, "max_tokens":max_tokens, "stream":False}).encode()
     req = urllib.request.Request(endpoint, data=payload, headers={"Authorization":f"Bearer {key}", "Content-Type":"application/json", "Accept":"application/json"})
@@ -49,16 +47,13 @@ def call_ai(system, user, max_tokens=6000):
       except Exception as error:
         failure = error
         if attempt < 3: time.sleep(2 ** attempt)
-    try:
-        if not (agnes or cohere or zen) or endpoint.startswith("https://integrate.api.nvidia.com"): raise failure
-        fallback_key = os.environ.get("NVIDIA_API_KEY")
-        if not fallback_key: raise
-        fallback = json.dumps({"model":"nvidia/nemotron-3-super-120b-a12b","messages":[{"role":"system","content":system},{"role":"user","content":user}],"temperature":0.35,"max_tokens":max_tokens,"stream":False}).encode()
-        request = urllib.request.Request("https://integrate.api.nvidia.com/v1/chat/completions", data=fallback, headers={"Authorization":f"Bearer {fallback_key}","Content-Type":"application/json","Accept":"application/json"})
-        with urllib.request.urlopen(request, timeout=180) as response:
-            return json.load(response)["choices"][0]["message"]["content"]
-    except Exception:
-        raise failure
+    # No silent fallback to another provider: surface the real provider error
+    # so the job fails honestly instead of answering from the wrong model.
+    raise failure
+
+def skill_prefix():
+    skills = (os.environ.get("SKILL_CONTEXT") or "").strip()
+    return ("Активные навыки задачи (следуй им; для операций используй только реальные возможности раннера: работа с файлами, архивами, проверка результата):\n" + skills + "\n\n") if skills else ""
 
 def run_subagents(prompt, task_type):
     roles = [
@@ -90,7 +85,7 @@ def safe_package(value):
 def android_template(prompt):
     system = '''Ты Android-разработчик. Создай небольшое, но реально работающее приложение Jetpack Compose по запросу. Верни только JSON без markdown с полями app_name, package_name и main_activity. main_activity — полный Kotlin-файл MainActivity.kt. Используй только Compose Material3, core-ktx и activity-compose. Никаких сторонних библиотек, WebView, ресурсов drawable и XML. compileSdk 35, minSdk 26. Код обязан компилироваться.'''
     advice = run_subagents(prompt, "Android APK")
-    spec = object_from(call_ai(system, f"ЗАПРОС:\n{prompt}\n\nОТЧЁТЫ САБ-АГЕНТОВ:\n{advice}"))
+    spec = object_from(call_ai(skill_prefix() + system, f"ЗАПРОС:\n{prompt}\n\nОТЧЁТЫ САБ-АГЕНТОВ:\n{advice}"))
     app_name = str(spec.get("app_name") or "WorkAI Result")[:40]
     package = safe_package(spec.get("package_name"))
     main = str(spec.get("main_activity") or "")
@@ -142,7 +137,7 @@ def make_archive(prompt, job_id, kind):
                 tree.append(row)
         system='''Ты редактор ZIP/MTZ. Верни только JSON: {"edits":[{"path":"путь","content":"полное новое содержимое"}],"deletes":["путь"]}. Меняй только то, что требуется. Не выдумывай бинарные файлы и не используй ../. Для MTZ сохраняй совместимость HyperOS/MIUI.'''
         advice=run_subagents(prompt, f"редактирование {kind.upper()}")
-        plan=object_from(call_ai(system,f"ЗАДАЧА:\n{prompt}\n\nОТЧЁТЫ САБ-АГЕНТОВ:\n{advice}\n\nФАЙЛЫ:\n{json.dumps(tree,ensure_ascii=False)[:100000]}",6000))
+        plan=object_from(call_ai(skill_prefix() + system,f"ЗАДАЧА:\n{prompt}\n\nОТЧЁТЫ САБ-АГЕНТОВ:\n{advice}\n\nФАЙЛЫ:\n{json.dumps(tree,ensure_ascii=False)[:100000]}",6000))
         for rel in plan.get("deletes",[]):
             target=(folder/str(rel)).resolve()
             if str(target).startswith(str(folder.resolve())) and target.is_file(): target.unlink()

@@ -8,6 +8,17 @@ permissions:
   contents: read
 
 jobs:
+  worker-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Build skills bundle and run Worker tests
+        working-directory: worker
+        run: node build-skills.mjs && node --test tests/zen.test.js
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20

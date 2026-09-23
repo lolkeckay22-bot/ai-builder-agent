@@ -4,6 +4,10 @@ local.properties
 .idea/
 build/
 **/build/
+node_modules/
+**/node_modules/
+__pycache__/
+**/__pycache__/
 captures/
 .externalNativeBuild/
 .cxx/

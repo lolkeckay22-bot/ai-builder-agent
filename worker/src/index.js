@@ -1,5 +1,10 @@
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
+import { zenDiagnose, zenModels } from "./zen.js";
+import { SKILL_BUNDLES } from "./skills.bundle.js";
+
+export { CHAT_TOOLS, executeChatTool, webSearch, webFetchPage, attachImages, responsesInput };
+
 function json(data, status = 200, extra = {}) {
   return new Response(JSON.stringify(data), { status, headers: { ...JSON_HEADERS, ...extra } });
 }
@@ -32,7 +37,25 @@ const ALLOWED_MODELS = new Set([
 ]);
 const ZEN_MODELS=new Set(["nemotron-3-ultra-free","mimo-v2.6-flash-free","muse-spark-1.3-contributor-free","muse-spark-1.2-contributor-free"]);
 const ZEN_RESPONSES_MODELS=new Set(["muse-spark-1.3-contributor-free","muse-spark-1.2-contributor-free"]);
-function responsesInput(messages){const input=[];for(const m of messages){if(m.role==="tool"){input.push({type:"function_call_output",call_id:m.tool_call_id,output:String(m.content||"")});continue}if(m.tool_calls){if(m.content)input.push({role:m.role,content:m.content});for(const c of m.tool_calls)input.push({type:"function_call",call_id:c.id,name:c.function?.name||"",arguments:c.function?.arguments||"{}"});continue}input.push({role:m.role,content:m.content??""})}return input}
+function responsesInput(messages){const input=[];for(const m of messages){if(m.role==="tool"){input.push({type:"function_call_output",call_id:m.tool_call_id,output:String(m.content||"")});continue}if(m.tool_calls){if(m.content)input.push({role:m.role,content:m.content});for(const c of m.tool_calls)input.push({type:"function_call",call_id:c.id,name:c.function?.name||"",arguments:c.function?.arguments||"{}"});continue}if(Array.isArray(m.content)){input.push({role:m.role==="assistant"?"assistant":"user",content:m.content.map(p=>{if(p.type==="image_url"){const url=typeof p.image_url==="string"?p.image_url:p.image_url?.url;return {type:"input_image",image_url:url}}return {type:"input_text",text:String(p.text??p.content??"")}})});continue}input.push({role:m.role,content:m.content??""})}return input}
+
+function attachImages(messages, images) {
+  const list = (Array.isArray(images) ? images : []).slice(0, 4).map(img => {
+    const raw = String(img?.base64 || img?.dataUrl || "").replace(/\s+/g, "");
+    if (!raw) return null;
+    const url = raw.startsWith("data:") ? raw : `data:${String(img?.mime || "image/png").slice(0, 80)};base64,${raw}`;
+    if (url.length > 12_000_000) throw Object.assign(new Error("image_too_large"), { httpStatus: 400 });
+    return { type: "image_url", image_url: { url, detail: "auto" } };
+  }).filter(Boolean);
+  if (!list.length) return { messages, count: 0 };
+  const out = messages.map(m => ({ ...m }));
+  const idx = out.map(m => m.role).lastIndexOf("user");
+  const base = out[idx >= 0 ? idx : out.length - 1];
+  const text = typeof base?.content === "string" ? base.content : JSON.stringify(base?.content ?? "");
+  const merged = { role: "user", content: [{ type: "text", text }, ...list] };
+  if (idx >= 0) out[idx] = merged; else out.push(merged);
+  return { messages: out, count: list.length };
+}
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -70,7 +93,19 @@ function decodeXml(value) {
     .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
 }
 
-async function webSearch(query) {
+async function braveSearch(env, query) {
+  const key = env?.BRAVE_API_KEY || "";
+  if (!key) return null; // caller falls back to DuckDuckGo/Bing chain
+  const response = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=8`, {
+    headers: { "X-Subscription-Token": key, accept: "application/json", "user-agent": "WorkAI-Agent/1.0" },
+  });
+  if (!response.ok) throw new Error(`brave_${response.status}`);
+  const data = await response.json();
+  const items = data.web?.results || data.results || [];
+  return items.slice(0, 8).map(r => ({ title: String(r.title || ""), url: String(r.url || ""), snippet: String(r.description || r.snippet || "").slice(0, 600) })).filter(r => safeHttpUrl(r.url));
+}
+
+async function duckSearch(query) {
   const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, { headers: { "user-agent": "Mozilla/5.0 WorkAI/0.1" } });
   if (!response.ok) throw new Error(`search_${response.status}`);
   const html = await response.text();
@@ -96,6 +131,32 @@ async function webSearch(query) {
   return fallback;
 }
 
+async function webSearch(env, query) {
+  const q = String(query || "").trim().slice(0, 300);
+  if (!q) throw new Error("empty_query");
+  try {
+    const brave = await braveSearch(env, q);
+    if (brave && brave.length) return { results: brave, engine: "brave" };
+  } catch (error) {
+    try {
+      const fallback = await duckSearch(q);
+      return { results: fallback, engine: "duckduckgo", note: `Brave failed (${String(error?.message || error).slice(0, 80)}), used fallback` };
+    } catch { throw error; }
+  }
+  return { results: await duckSearch(q), engine: "duckduckgo" };
+}
+
+async function webFetchPage(url, maxChars = 20000) {
+  const target = safeHttpUrl(String(url || ""));
+  if (!target) throw new Error("bad_url");
+  const response = await fetch(target.toString(), { headers: { "user-agent": "WorkAI-Agent/1.0", accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5" }, redirect: "follow" });
+  if (!response.ok) throw new Error(`fetch_${response.status}`);
+  const html = await response.text();
+  const cap = Math.min(Math.max(maxChars || 20000, 1000), 60000);
+  const links = [...html.matchAll(/<a[^>]+href=["'](https?:[^"']{1,300})["'][^>]*>([^<]{1,120})</gi)].slice(0, 20).map(m => ({ url: m[1], text: m[2].trim() }));
+  return { ok: true, url: target.toString(), title: (html.match(/<title[^>]*>([^<]{1,200})</i) || [])[1]?.trim() || "", text: plainText(html).slice(0, cap), links };
+}
+
 async function exchangeRate(base, quote) {
   const from=String(base||"USD").toUpperCase().replace(/[^A-Z]/g,"").slice(0,3),to=String(quote||"UAH").toUpperCase().replace(/[^A-Z]/g,"").slice(0,3);
   if(from==="USD"&&to==="UAH"){
@@ -111,7 +172,7 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
   const model=agnes?(env.NVIDIA_MODEL||"nvidia/nemotron-3-super-120b-a12b"):selected;
   const endpoint=responses?"https://opencode.ai/zen/v1/responses":zen?"https://opencode.ai/zen/v1/chat/completions":cohere?"https://api.cohere.com/compatibility/v1/chat/completions":"https://integrate.api.nvidia.com/v1/chat/completions";
   const apiKey=zen?env.OPENCODE_API_KEY:cohere?env.COHERE_API_KEY:env.NVIDIA_API_KEY;
-  const provider=zen?"OPENCODE":cohere?"COHERE":"NVIDIA";if(!apiKey)throw new Error(`${provider}_API_KEY is not configured`);
+  const provider=zen?"OPENCODE":cohere?"COHERE":"NVIDIA";if(!apiKey){const missing=new Error(`${provider}_API_KEY is not configured`);missing.httpStatus=503;missing.provider=zen?"zen":cohere?"cohere":"nvidia";throw missing}
   let lastStatus = 0;
   let lastText = "";
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -123,6 +184,7 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
           "authorization": `Bearer ${apiKey}`,
           "content-type": "application/json",
           "accept": "application/json",
+          "user-agent": "WorkAI-Agent/1.0",
         },
         body: JSON.stringify(responses?{model,input:responsesInput(messages),max_output_tokens:maxTokens,stream:false}:{model,messages,temperature,max_tokens:maxTokens,stream:false}),
       });
@@ -132,11 +194,16 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
         const data = JSON.parse(lastText);
         return String(responses?(data.output_text||data.output?.flatMap(x=>x.content||[]).map(x=>x.text||"").join("")):data.choices?.[0]?.message?.content||"").trim();
       }
-      if (![408, 429, 500, 502, 503, 504].includes(response.status)) break;
+      if (![408, 429, 500, 502, 503, 504].includes(response.status)) {
+        const fatal = new Error(`${zen?"OpenCode Zen":cohere?"Cohere":"NVIDIA"} ${response.status}: ${lastText.slice(0, 300)}`);
+        fatal.httpStatus = response.status; fatal.provider = zen ? "zen" : cohere ? "cohere" : "nvidia";
+        throw fatal;
+      }
       const retryAfter = Number(response.headers.get("retry-after"));
       const backoff = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 700 * (2 ** attempt) + Math.floor(Math.random() * 350);
       await sleep(Math.min(backoff, 9000));
     } catch (error) {
+      if (error?.httpStatus) throw error;
       lastText = String(error?.message || error);
       if (attempt === 4) break;
       await sleep(700 * (2 ** attempt));
@@ -152,19 +219,19 @@ async function nvidiaStream(env, messages, requestedModel, requestedEffort, tool
   const endpoint = responses?"https://opencode.ai/zen/v1/responses":zen?"https://opencode.ai/zen/v1/chat/completions":cohere ? "https://api.cohere.com/compatibility/v1/chat/completions" : agnes ? "https://apihub.agnes-ai.com/v1/chat/completions" : "https://integrate.api.nvidia.com/v1/chat/completions";
   const apiKey = zen?env.OPENCODE_API_KEY:cohere ? env.COHERE_API_KEY : agnes ? env.AGNES_API_KEY : env.NVIDIA_API_KEY;
   const provider=zen?"OpenCode Zen":cohere?"Cohere":agnes?"Agnes":"NVIDIA";
-  if(!apiKey)throw new Error(`${provider}_API_KEY is not configured`);
+  if(!apiKey){const missing=new Error(`${provider}_API_KEY is not configured`);missing.httpStatus=503;missing.provider=zen?"zen":cohere?"cohere":agnes?"agnes":"nvidia";throw missing}
   const allowed = model.includes("ultra") ? new Set(["none", "medium", "high"]) : new Set(["none", "low", "high"]);
   const reasoningEffort = allowed.has(requestedEffort) ? requestedEffort : (model.includes("ultra") ? "medium" : "low");
   let lastText = "";
   for (let attempt = 0; attempt < 5; attempt++) {
     let response;
     try{response = await fetch(endpoint, {
-      method: "POST",headers: { "authorization": `Bearer ${apiKey}`, "content-type": "application/json", "accept": "text/event-stream" },
+      method: "POST",headers: { "authorization": `Bearer ${apiKey}`, "content-type": "application/json", "accept": "text/event-stream", "user-agent": "WorkAI-Agent/1.0" },
       body: JSON.stringify(responses?{model,input:responsesInput(messages),max_output_tokens:4096,stream:true,...(tools.length?{tools:tools.map(t=>({type:"function",name:t.function.name,description:t.function.description,parameters:t.function.parameters})),tool_choice:"auto"}:{})}:{ model, messages, temperature: 0.45, max_tokens: 4096, stream: true, ...(tools.length?{tools,tool_choice:"auto"}:{}), ...((agnes||cohere||zen)?{}:{reasoning_effort: reasoningEffort}) }),
     });}catch(error){lastText=String(error?.message||error);if(attempt<4){await sleep(Math.min(700*(2**attempt),9000));continue}throw new Error(`${provider} network: ${lastText.slice(0,300)}`);}
     if (response.ok) return response;
     lastText = await response.text();
-    if (![408,429,500,502,503,504].includes(response.status)) throw new Error(`${provider} ${response.status}: ${lastText.slice(0,300)}`);
+    if (![408,429,500,502,503,504].includes(response.status)) { const fatal = new Error(`${provider} ${response.status}: ${lastText.slice(0,300)}`); fatal.httpStatus = response.status; fatal.provider = zen ? "zen" : cohere ? "cohere" : agnes ? "agnes" : "nvidia"; throw fatal; }
     const wait = Number(response.headers.get("retry-after"));
     await sleep(Math.min(wait > 0 ? wait * 1000 : 700 * (2 ** attempt) + Math.random() * 350, 9000));
   }
@@ -212,24 +279,24 @@ async function relayProvider(upstream, send, turn, allowContentTerminated=false)
 }
 
 const CHAT_TOOLS=[
-  {type:"function",function:{name:"get_weather",description:"Получить текущую погоду. Используй только для погоды.",parameters:{type:"object",properties:{location:{type:"string"}},required:["location"]}}},
   {type:"function",function:{name:"get_exchange_rate",description:"Получить актуальный официальный курс валют. Используй для текущего курса валют вместо общего веб-поиска.",parameters:{type:"object",properties:{base:{type:"string",description:"Базовая валюта, например USD"},quote:{type:"string",description:"Валюта котировки, например UAH"}},required:["base","quote"]}}},
-  {type:"function",function:{name:"web_search",description:"Искать актуальную внешнюю информацию. Не используй для создания файлов, обычных знаний, письма, перевода или математики.",parameters:{type:"object",properties:{query:{type:"string"}},required:["query"]}}}
+  {type:"function",function:{name:"web_search",description:"Универсальный веб-поиск актуальной информации. Можно вызывать несколько раз с уточнёнными запросами.",parameters:{type:"object",properties:{query:{type:"string"}},required:["query"]}}},
+  {type:"function",function:{name:"web_fetch",description:"Открыть найденную страницу и прочитать её содержимое. Используй после web_search для проверки источников.",parameters:{type:"object",properties:{url:{type:"string",description:"Полный https URL страницы"}},required:["url"]}}}
 ];
 
-async function executeChatTool(call,send){
+async function executeChatTool(env, call, send){
   const name=String(call.function?.name||"");let args={};try{args=JSON.parse(call.function?.arguments||"{}")}catch{}
-  if(name==="get_weather"){
-    const location=String(args.location||"Киев").slice(0,80);send({type:"tool_call",id:call.id,name,label:`Проверяю погоду: ${location}`,icon:"search"});
-    try{const geo=await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1&language=ru&format=json`);const point=(await geo.json()).results?.[0];if(!point)throw new Error("location_not_found");const response=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${point.latitude}&longitude=${point.longitude}&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m&timezone=auto`);if(!response.ok)throw new Error(`weather_${response.status}`);const data=await response.json();const result={ok:true,location:point.name,country:point.country,current:data.current,source:"https://open-meteo.com/"};send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Погода для ${point.name} получена`,icon:"search"});return {result:JSON.stringify(result),sources:[{url:"https://open-meteo.com/",title:"Open-Meteo — прогноз погоды",domain:"open-meteo.com",snippet:`Текущая погода для ${point.name}`,favicon:"https://open-meteo.com/favicon.ico"}]};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Не удалось получить погоду: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
-  }
   if(name==="get_exchange_rate"){
     const base=String(args.base||"USD"),quote=String(args.quote||"UAH");send({type:"tool_call",id:call.id,name,label:`Проверяю курс ${base.toUpperCase()} к ${quote.toUpperCase()}`,icon:"search"});
     try{const data=await exchangeRate(base,quote);const u=new URL(data.source);send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Курс ${data.base}/${data.quote} получен`,icon:"search"});return {result:JSON.stringify(data),sources:[{url:data.source,title:data.source.includes("bank.gov.ua")?"Национальный банк Украины — официальный курс":"Frankfurter — exchange rates",domain:u.hostname.replace(/^www\./,""),snippet:`${data.date}: 1 ${data.base} = ${data.rate} ${data.quote}`,favicon:`${u.origin}/favicon.ico`}]};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Курс не получен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
   }
   if(name==="web_search"){
     const query=String(args.query||"").trim().slice(0,300);send({type:"tool_call",id:call.id,name,label:`Поиск «${query}»`,icon:"search"});
-    try{const results=await webSearch(query);const sources=results.map(r=>{const u=new URL(r.url);return {url:r.url,title:r.title||u.hostname,domain:u.hostname.replace(/^www\./,""),snippet:r.snippet,favicon:`${u.origin}/favicon.ico`}});send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Найдено результатов: ${results.length}`,icon:"search"});return {result:JSON.stringify({ok:true,query,results}),sources};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Поиск не выполнен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
+    try{const found=await webSearch(env,query);const results=found.results;const sources=results.map(r=>{const u=new URL(r.url);return {url:r.url,title:r.title||u.hostname,domain:u.hostname.replace(/^www\./,""),snippet:r.snippet,favicon:`${u.origin}/favicon.ico`}});send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Найдено результатов: ${results.length} (${found.engine})`,icon:"search"});return {result:JSON.stringify({ok:true,query,engine:found.engine,results}),sources};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Поиск не выполнен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
+  }
+  if(name==="web_fetch"){
+    const url=String(args.url||"").slice(0,500);send({type:"tool_call",id:call.id,name,label:`Открываю ${url.slice(0,80)}`,icon:"search"});
+    try{const page=await webFetchPage(url);const u=new URL(page.url);const sources=[{url:page.url,title:page.title||u.hostname,domain:u.hostname.replace(/^www\./,""),snippet:page.text.slice(0,300),favicon:`${u.origin}/favicon.ico`}];send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Страница прочитана: ${(page.title||u.hostname).slice(0,80)}`,icon:"search"});return {result:JSON.stringify(page).slice(0,20000),sources};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Не удалось прочитать страницу: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
   }
   const result=JSON.stringify({ok:false,error:"unknown_tool"});send({type:"tool_result",id:call.id,name,status:"fatal_error",text:`Неизвестный инструмент: ${name}`,icon:"error"});return {result,sources:[]};
 }
@@ -241,8 +308,9 @@ function executionStream(env, body, model, messages, custom) {
     try{
       const now=new Intl.DateTimeFormat("ru-RU",{timeZone:"Europe/Kyiv",dateStyle:"full",timeStyle:"long"}).format(new Date());
       const creationInstruction=body.creation_request&&String(body.mode)==="chat"?" Пользователь просит создать или изменить файл. Кратко и естественно объясни, что для фактического выполнения нужно перейти во вкладку «Работа»; не утверждай, что файл уже создаётся. Под ответом приложение покажет кнопки «Перейти» и «Пропустить». Перефразируй это самостоятельно, не используй шаблонную канцелярскую фразу.":"";
-      const system={role:"system",content:`Ты WorkAI — мобильный AI-агент. Текущие дата и время в Киеве: ${now}. Отвечай на языке пользователя. Сам решай, нужен ли инструмент. Веб-поиск допустим только при прямой просьбе искать или для актуальных внешних данных; никогда не ищи способы создания MTZ/ZIP/APK и не используй поиск для обычных знаний.${creationInstruction} Если вызываешь инструмент, перед вызовом естественно и кратко скажи пользователю, что именно проверишь. После tool result обязательно проанализируй результат новым model turn и дай ответ. Ошибка инструмента не завершает задачу: попробуй исправимый альтернативный запрос либо честно объясни конкретную причину. Не заявляй об успехе до проверки результата. Не печатай внутренний JSON. Используй Markdown. Источники показывает интерфейс.${custom?`\n\nПользовательские инструкции:\n${custom}`:""}`};
-      const history=[system,...messages],allSources=[],toolMemory=[];let finalText="",finished=false,emptyTurns=0;
+      const system={role:"system",content:`Ты WorkAI — мобильный AI-агент. Текущие дата и время в Киеве: ${now}. Отвечай на языке пользователя. Сам решай, нужен ли инструмент. Web — универсальный инструмент: для погоды, новостей, курсов и других актуальных данных используй web_search (можно несколько запросов с уточнениями), затем web_fetch для открытия и чтения найденных страниц и проверки других источников; никогда не ищи способы создания MTZ/ZIP/APK и не используй поиск для обычных знаний.${body.images?.length ? " К сообщению приложены изображения: анализируй их напрямую по пикселям, не подменяй анализ выдумкой; если провайдер вернёт ошибку vision — честно скажи, что модель не поддерживает изображения." : ""}${creationInstruction} Если вызываешь инструмент, перед вызовом естественно и кратко скажи пользователю, что именно проверишь. После tool result обязательно проанализируй результат новым model turn и дай ответ. Ошибка инструмента не завершает задачу: попробуй исправимый альтернативный запрос либо честно объясни конкретную причину. Не заявляй об успехе до проверки результата. Не печатай внутренний JSON. Используй Markdown. Источники показывает интерфейс.${custom?`\n\nПользовательские инструкции:\n${custom}`:""}`};
+      const withImages = attachImages(messages, body.images);
+      const history=[system,...withImages.messages],allSources=[],toolMemory=[];let finalText="",finished=false,emptyTurns=0;
       for(let turn=1;turn<=8&&!finished;turn++){
         send({type:"model_turn_start",turn});
         const upstream=await nvidiaStream(env,history,model,String(body.reasoning_effort||""),CHAT_TOOLS);
@@ -250,7 +318,7 @@ function executionStream(env, body, model, messages, custom) {
         const assistant={role:"assistant",content:generated.content||null};if(generated.toolCalls.length)assistant.tool_calls=generated.toolCalls;history.push(assistant);
         if(!generated.toolCalls.length){finalText=generated.content.trim();if(!finalText){emptyTurns++;if(emptyTurns<2){history.push({role:"user",content:"Ты завершил ход без ответа. Продолжи: используй уже полученные tool results и сформируй содержательный финальный ответ пользователю. Не вызывай повторно тот же поиск без изменения запроса."});continue}const fallback=await nvidia(env,[...history,{role:"user",content:"Сформируй финальный ответ по истории и результатам инструментов. Если данных недостаточно, конкретно объясни это и предложи полезный следующий шаг."}],2048,0.35);finalText=fallback.trim()||"Не удалось получить содержательный ответ от выбранной модели. Попробуйте повторить запрос или выбрать другую модель.";}send({type:"text_delta",delta:finalText});finished=true;break;}
         if(generated.content.trim())send({type:"intermediate",text:generated.content.trim(),turn});
-        for(const call of generated.toolCalls){const executed=await executeChatTool(call,send);history.push({role:"tool",tool_call_id:call.id,name:call.function.name,content:executed.result});toolMemory.push(`${call.function.name}: ${executed.result}`);allSources.push(...executed.sources);}
+        for(const call of generated.toolCalls){const executed=await executeChatTool(env,call,send);history.push({role:"tool",tool_call_id:call.id,name:call.function.name,content:executed.result});toolMemory.push(`${call.function.name}: ${executed.result}`);allSources.push(...executed.sources);}
       }
       if(!finished)throw new Error("agent_turn_limit_reached");
       const unique=[...new Map(allSources.map(s=>[s.url,s])).values()].slice(0,8);if(unique.length)send({type:"sources",items:unique});
@@ -279,6 +347,16 @@ function parseJsonObject(text) {
   const end = text.lastIndexOf("}");
   if (start < 0 || end <= start) return null;
   try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }
+}
+
+// Full SKILL.md texts for the planner-selected skills, passed to the build
+// runner so skills genuinely shape the model context (each skill maps to the
+// real tools the runner implements: file/archive/zip operations, web tools).
+function skillContext(names) {
+  const picked = (Array.isArray(names) ? names : []).map(String).filter(Boolean).slice(0, 4);
+  const texts = picked.map(n => SKILL_BUNDLES.find(s => s.name === n)).filter(Boolean)
+    .map(s => `## Skill: ${s.name}\n${s.text}`.slice(0, 2500));
+  return texts.join("\n\n").slice(0, 6000);
 }
 
 async function createPlan(env, prompt, kind, model) {
@@ -316,7 +394,7 @@ async function startJob(request, env, url) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       event_type: "workai_build",
-      client_payload: { id, prompt, kind, tasks, attachments, model: ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL, reasoning_effort: String(body.reasoning_effort || ""), system_prompt: String(body.system_prompt || "").slice(0, 8000), callback_origin: url.origin },
+      client_payload: { id, prompt, kind, tasks, attachments, skill_context: skillContext(plan.skills), model: ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL, reasoning_effort: String(body.reasoning_effort || ""), system_prompt: String(body.system_prompt || "").slice(0, 8000), callback_origin: url.origin },
     }),
   });
   if (!dispatch.ok) return json({ error: "dispatch_failed", detail: (await dispatch.text()).slice(0, 500) }, 502, cors(request));
@@ -390,6 +468,13 @@ export default {
     if (url.pathname === "/health") return json({ ok: true, service: "WorkAI", model: env.NVIDIA_MODEL }, 200, cors(request));
     if (!authorized(request, env)) return json({ error: "unauthorized" }, 401, cors(request));
     try {
+      if (url.pathname === "/v1/zen/models" && request.method === "GET") {
+        return json({ provider: "zen", base: "https://opencode.ai/zen/v1", models: zenModels() }, 200, cors(request));
+      }
+      if (url.pathname === "/v1/zen/diagnose" && request.method === "GET") {
+        const probe = url.searchParams.get("probe") === "1";
+        return json(await zenDiagnose(env, { probe }), 200, cors(request));
+      }
       if (url.pathname === "/v1/chat" && request.method === "POST") {
         const body = await request.json();
         const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
@@ -419,6 +504,14 @@ export default {
       const review=url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)\/review$/);if(review&&request.method==="POST")return await reviewJob(request,env,review[1]);
       return json({ error: "not_found" }, 404, cors(request));
     } catch (error) {
+      if (error instanceof SyntaxError) return json({ error: "invalid_json", detail: "Request body is not valid JSON." }, 400, cors(request));
+      if (error?.httpStatus && error.httpStatus >= 400 && error.httpStatus < 600) {
+        return json({ error: "provider_error", provider: error.provider || "unknown", detail: String(error?.message || error).slice(0, 700) }, error.httpStatus, cors(request));
+      }
+      const providerMatch = /^((?:OpenCode Zen|NVIDIA|Cohere|Agnes)(?: overloaded| network)?) (\d{3}):/.exec(String(error?.message || ""));
+      if (providerMatch) {
+        return json({ error: "provider_error", provider: providerMatch[1], detail: String(error?.message || error).slice(0, 700) }, Number(providerMatch[2]), cors(request));
+      }
       return json({ error: "internal_error", detail: String(error?.message || error).slice(0, 700) }, 500, cors(request));
     }
   },

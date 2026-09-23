@@ -84,6 +84,8 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
     private val jobs=mutableMapOf<String,Job>()
     private val calls=mutableMapOf<String,Call>()
     private val handoffFiles=mutableMapOf<String,List<PendingAttachment>>()
+    // Image bytes are consumed by the next runChat (multimodal provider request).
+    private val pendingImages=mutableMapOf<String,List<PendingAttachment>>()
     private val _ui=MutableStateFlow(load()); val ui:StateFlow<AppUiState> = _ui.asStateFlow()
     fun setInput(v:String){_ui.value=_ui.value.copy(input=v)}
     fun selectModel(v:String){
@@ -135,6 +137,7 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
         if(_ui.value.deviceToken.length<20){_ui.value=_ui.value.copy(settingsOpen=true,error="Введите WORKAI_DEVICE_TOKEN из GitHub Secrets");return}
         val title=if(chat.messages.isEmpty())prompt.take(42)else chat.title
         val cards=files.map{MessageAttachment(it.name,it.mime)}
+        pendingImages[chat.id]=files.filter{it.mime.startsWith("image/")&&it.bytes.size<=6*1024*1024}.take(4)
         update(chat.id){it.copy(title=title,messages=it.messages+ChatMessage(MessageRole.USER,rawPrompt,attachments=cards,context=prompt),updatedAt=System.currentTimeMillis())}
         _ui.value=_ui.value.copy(input="",attachments=emptyList(),runningIds=_ui.value.runningIds+chat.id,error=null)
         ContextCompat.startForegroundService(getApplication(),Intent(getApplication(),AgentForegroundService::class.java))
@@ -151,7 +154,7 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
     }
     fun stop(){_ui.value.activeId.let{calls.remove(it)?.cancel();jobs[it]?.cancel()}}
 
-    private suspend fun runChat(id:String,creationRequest:Boolean=false){val chat=_ui.value.conversations.first{it.id==id};val a=JSONArray();chat.messages.dropLast(1).takeLast(30).forEach{a.put(JSONObject().put("role",if(it.role==MessageRole.USER)"user" else "assistant").put("content",it.context?:it.text))};streamApi(id,JSONObject().put("messages",a).put("model",_ui.value.selectedModel).put("reasoning_effort",_ui.value.reasoningEffort).put("system_prompt",_ui.value.systemPrompt).put("mode",chat.mode.name.lowercase()).put("creation_request",creationRequest))}
+    private suspend fun runChat(id:String,creationRequest:Boolean=false){val chat=_ui.value.conversations.first{it.id==id};val a=JSONArray();chat.messages.dropLast(1).takeLast(30).forEach{a.put(JSONObject().put("role",if(it.role==MessageRole.USER)"user" else "assistant").put("content",it.context?:it.text))};val images=JSONArray();pendingImages.remove(id).orEmpty().forEach{images.put(JSONObject().put("mime",it.mime).put("base64",Base64.encodeToString(it.bytes,Base64.NO_WRAP)))};streamApi(id,JSONObject().put("messages",a).put("images",images).put("model",_ui.value.selectedModel).put("reasoning_effort",_ui.value.reasoningEffort).put("system_prompt",_ui.value.systemPrompt).put("mode",chat.mode.name.lowercase()).put("creation_request",creationRequest))}
     private fun mutateExecution(id:String,save:Boolean=true,transform:(ChatMessage)->ChatMessage){update(id,save){c->val list=c.messages.toMutableList();val index=list.indexOfLast{it.role==MessageRole.ASSISTANT&&it.execution?.state==ExecutionState.RUNNING};if(index>=0)list[index]=transform(list[index]);c.copy(messages=list,updatedAt=System.currentTimeMillis())}}
     private fun appendEvent(id:String,type:ExecutionEventType,text:String,icon:String="terminal"){if(text.isBlank())return;mutateExecution(id){m->
         val session=m.execution?:return@mutateExecution m;val events=session.events.toMutableList();val last=events.lastOrNull()

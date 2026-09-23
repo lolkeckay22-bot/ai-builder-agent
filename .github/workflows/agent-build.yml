@@ -23,6 +23,7 @@ jobs:
       PROMPT: ${{ github.event.client_payload.prompt }}
       ATTACHMENTS: ${{ toJson(github.event.client_payload.attachments) }}
       MODEL: ${{ github.event.client_payload.model }}
+      SKILL_CONTEXT: ${{ github.event.client_payload.skill_context }}
       REASONING_EFFORT: ${{ github.event.client_payload.reasoning_effort }}
       USER_SYSTEM_PROMPT: ${{ github.event.client_payload.system_prompt }}
       GH_TOKEN: ${{ github.token }}
