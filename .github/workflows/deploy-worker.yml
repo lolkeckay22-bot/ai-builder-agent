@@ -42,6 +42,7 @@ jobs:
           printf '%s' "$NVIDIA_API_KEY" | npx wrangler secret put NVIDIA_API_KEY
           if [ -n "$AGNES_API_KEY" ]; then printf '%s' "$AGNES_API_KEY" | npx wrangler secret put AGNES_API_KEY; fi
           if [ -n "$COHERE_API_KEY" ]; then printf '%s' "$COHERE_API_KEY" | npx wrangler secret put COHERE_API_KEY; fi
+          if [ -z "$OPENCODE_API_KEY" ]; then echo "OPENCODE_API_KEY is missing from GitHub Actions secrets" >&2; exit 1; fi
           if [ -n "$OPENCODE_API_KEY" ]; then printf '%s' "$OPENCODE_API_KEY" | npx wrangler secret put OPENCODE_API_KEY; fi
           printf '%s' "$WORKAI_GITHUB_TOKEN" | npx wrangler secret put WORKAI_GITHUB_TOKEN
           printf '%s' "$WORKAI_DEVICE_TOKEN" | npx wrangler secret put WORKAI_DEVICE_TOKEN

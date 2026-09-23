@@ -25,13 +25,19 @@ const ALLOWED_MODELS = new Set([
   "agnes-2.5-flash",
   "agnes-3.0-flash",
   "north-mini-code-1-0",
+  "deepseek-v4-flash-vision-exp",
   "nemotron-3-ultra-free",
   "mimo-v2.6-flash-free",
   "muse-spark-1.3-contributor-free",
-  "muse-spark-1.2-contributor-free",
 ]);
-const ZEN_MODELS=new Set(["nemotron-3-ultra-free","mimo-v2.6-flash-free","muse-spark-1.3-contributor-free","muse-spark-1.2-contributor-free"]);
-const ZEN_RESPONSES_MODELS=new Set(["muse-spark-1.3-contributor-free","muse-spark-1.2-contributor-free"]);
+const VISION_MODELS=new Set(["deepseek-v4-flash-vision-exp"]);
+const ZEN_MODELS=new Set(["deepseek-v4-flash-vision-exp","nemotron-3-ultra-free","mimo-v2.6-flash-free","muse-spark-1.3-contributor-free"]);
+const ZEN_RESPONSES_MODELS=new Set(["muse-spark-1.3-contributor-free"]);
+function validateModel(requested, env) {
+  const model=requested || env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b";
+  if(!ALLOWED_MODELS.has(model))throw new Error(`Unsupported model: ${model}`);
+  return model;
+}
 function responsesInput(messages){const input=[];for(const m of messages){if(m.role==="tool"){input.push({type:"function_call_output",call_id:m.tool_call_id,output:String(m.content||"")});continue}if(m.tool_calls){if(m.content)input.push({role:m.role,content:m.content});for(const c of m.tool_calls)input.push({type:"function_call",call_id:c.id,name:c.function?.name||"",arguments:c.function?.arguments||"{}"});continue}input.push({role:m.role,content:m.content??""})}return input}
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -106,7 +112,7 @@ async function exchangeRate(base, quote) {
 }
 
 async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, requestedModel) {
-  const selected=ALLOWED_MODELS.has(requestedModel)?requestedModel:(env.NVIDIA_MODEL||"nvidia/nemotron-3-super-120b-a12b");
+  const selected=validateModel(requestedModel,env);
   const agnes=selected.startsWith("agnes-"),cohere=selected==="north-mini-code-1-0",zen=ZEN_MODELS.has(selected),responses=ZEN_RESPONSES_MODELS.has(selected);
   const model=agnes?(env.NVIDIA_MODEL||"nvidia/nemotron-3-super-120b-a12b"):selected;
   const endpoint=responses?"https://opencode.ai/zen/v1/responses":zen?"https://opencode.ai/zen/v1/chat/completions":cohere?"https://api.cohere.com/compatibility/v1/chat/completions":"https://integrate.api.nvidia.com/v1/chat/completions";
@@ -146,7 +152,7 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
 }
 
 async function nvidiaStream(env, messages, requestedModel, requestedEffort, tools = []) {
-  const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : (env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b");
+  const model = validateModel(requestedModel,env);
   const agnes = model.startsWith("agnes-"),zen=ZEN_MODELS.has(model),responses=ZEN_RESPONSES_MODELS.has(model);
   const cohere = model === "north-mini-code-1-0";
   const endpoint = responses?"https://opencode.ai/zen/v1/responses":zen?"https://opencode.ai/zen/v1/chat/completions":cohere ? "https://api.cohere.com/compatibility/v1/chat/completions" : agnes ? "https://apihub.agnes-ai.com/v1/chat/completions" : "https://integrate.api.nvidia.com/v1/chat/completions";
@@ -212,17 +218,14 @@ async function relayProvider(upstream, send, turn, allowContentTerminated=false)
 }
 
 const CHAT_TOOLS=[
-  {type:"function",function:{name:"get_weather",description:"Получить текущую погоду. Используй только для погоды.",parameters:{type:"object",properties:{location:{type:"string"}},required:["location"]}}},
   {type:"function",function:{name:"get_exchange_rate",description:"Получить актуальный официальный курс валют. Используй для текущего курса валют вместо общего веб-поиска.",parameters:{type:"object",properties:{base:{type:"string",description:"Базовая валюта, например USD"},quote:{type:"string",description:"Валюта котировки, например UAH"}},required:["base","quote"]}}},
-  {type:"function",function:{name:"web_search",description:"Искать актуальную внешнюю информацию. Не используй для создания файлов, обычных знаний, письма, перевода или математики.",parameters:{type:"object",properties:{query:{type:"string"}},required:["query"]}}}
+  {type:"function",function:{name:"web_search",description:"Искать актуальные сведения в интернете, в том числе прогноз погоды. Если фрагментов мало, открой найденную страницу.",parameters:{type:"object",properties:{query:{type:"string"}},required:["query"]}}},
+  {type:"function",function:{name:"read_page",description:"Прочитать содержимое найденной HTTPS-страницы.",parameters:{type:"object",properties:{url:{type:"string"}},required:["url"]}}},
+  {type:"function",function:{name:"find_on_page",description:"Найти текст на HTTPS-странице и прочитать окружающий фрагмент.",parameters:{type:"object",properties:{url:{type:"string"},query:{type:"string"}},required:["url","query"]}}}
 ];
 
 async function executeChatTool(call,send){
   const name=String(call.function?.name||"");let args={};try{args=JSON.parse(call.function?.arguments||"{}")}catch{}
-  if(name==="get_weather"){
-    const location=String(args.location||"Киев").slice(0,80);send({type:"tool_call",id:call.id,name,label:`Проверяю погоду: ${location}`,icon:"search"});
-    try{const geo=await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1&language=ru&format=json`);const point=(await geo.json()).results?.[0];if(!point)throw new Error("location_not_found");const response=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${point.latitude}&longitude=${point.longitude}&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m&timezone=auto`);if(!response.ok)throw new Error(`weather_${response.status}`);const data=await response.json();const result={ok:true,location:point.name,country:point.country,current:data.current,source:"https://open-meteo.com/"};send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Погода для ${point.name} получена`,icon:"search"});return {result:JSON.stringify(result),sources:[{url:"https://open-meteo.com/",title:"Open-Meteo — прогноз погоды",domain:"open-meteo.com",snippet:`Текущая погода для ${point.name}`,favicon:"https://open-meteo.com/favicon.ico"}]};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Не удалось получить погоду: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
-  }
   if(name==="get_exchange_rate"){
     const base=String(args.base||"USD"),quote=String(args.quote||"UAH");send({type:"tool_call",id:call.id,name,label:`Проверяю курс ${base.toUpperCase()} к ${quote.toUpperCase()}`,icon:"search"});
     try{const data=await exchangeRate(base,quote);const u=new URL(data.source);send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Курс ${data.base}/${data.quote} получен`,icon:"search"});return {result:JSON.stringify(data),sources:[{url:data.source,title:data.source.includes("bank.gov.ua")?"Национальный банк Украины — официальный курс":"Frankfurter — exchange rates",domain:u.hostname.replace(/^www\./,""),snippet:`${data.date}: 1 ${data.base} = ${data.rate} ${data.quote}`,favicon:`${u.origin}/favicon.ico`}]};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Курс не получен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
@@ -230,6 +233,24 @@ async function executeChatTool(call,send){
   if(name==="web_search"){
     const query=String(args.query||"").trim().slice(0,300);send({type:"tool_call",id:call.id,name,label:`Поиск «${query}»`,icon:"search"});
     try{const results=await webSearch(query);const sources=results.map(r=>{const u=new URL(r.url);return {url:r.url,title:r.title||u.hostname,domain:u.hostname.replace(/^www\./,""),snippet:r.snippet,favicon:`${u.origin}/favicon.ico`}});send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Найдено результатов: ${results.length}`,icon:"search"});return {result:JSON.stringify({ok:true,query,results}),sources};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Поиск не выполнен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
+  }
+  if(name==="read_page"||name==="find_on_page"){
+    const url=safeHttpUrl(String(args.url||""));send({type:"tool_call",id:call.id,name,label:`Читаю страницу: ${url?.hostname||"некорректный URL"}`,icon:"web"});
+    try{
+      if(!url)throw new Error("invalid_https_url");
+      const response=await fetch(url.href,{redirect:"follow",headers:{"accept":"text/html,text/plain,application/json","user-agent":"Mozilla/5.0 WorkAI/0.2"},signal:AbortSignal.timeout(15000)});
+      if(!response.ok)throw new Error(`page_http_${response.status}`);
+      if(!safeHttpUrl(response.url))throw new Error("unsafe_redirect");
+      const contentType=response.headers.get("content-type")||"";
+      if(!/text\/html|text\/plain|application\/json/.test(contentType))throw new Error("unsupported_page_type");
+      const content=plainText((await response.text()).slice(0,250000));let excerpt=content.slice(0,16000);
+      if(name==="find_on_page"){
+        const query=String(args.query||"").trim().slice(0,200);if(!query)throw new Error("empty_query");
+        const position=content.toLowerCase().indexOf(query.toLowerCase());excerpt=position<0?"Текст не найден":content.slice(Math.max(0,position-1200),position+5000);
+      }
+      const source={url:response.url,title:url.hostname,domain:url.hostname,snippet:excerpt.slice(0,300),favicon:`${url.origin}/favicon.ico`};
+      send({type:"tool_result",id:call.id,name,status:"tool_success",text:"Страница прочитана",icon:"web"});return {result:JSON.stringify({ok:true,url:response.url,content:excerpt}),sources:[source]};
+    }catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Не удалось прочитать страницу: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
   }
   const result=JSON.stringify({ok:false,error:"unknown_tool"});send({type:"tool_result",id:call.id,name,status:"fatal_error",text:`Неизвестный инструмент: ${name}`,icon:"error"});return {result,sources:[]};
 }
@@ -288,7 +309,8 @@ async function createPlan(env, prompt, kind, model) {
   ], 900, 0.25, model);
   const parsed = parseJsonObject(raw);
   const tasks = Array.isArray(parsed?.tasks) ? parsed.tasks.map(String).filter(Boolean).slice(0, 7) : [];
-  return {reasoningSummary:String(parsed?.reasoning_summary||"").trim(),intro:String(parsed?.intro||"Составлю план и начну выполнение задачи."),skills:Array.isArray(parsed?.skills)?parsed.skills.map(String).filter(Boolean).filter(x=>x!=="web-research").slice(0,4):[],tasks:tasks.length?tasks:["Анализ запроса","Создание файлов","Сборка","Проверка","Публикация файла"]};
+  if(!tasks.length)throw new Error("model_plan_missing_tasks");
+  return {reasoningSummary:String(parsed?.reasoning_summary||"").trim(),intro:String(parsed?.intro||""),skills:Array.isArray(parsed?.skills)?parsed.skills.map(String).filter(Boolean).filter(x=>x!=="web-research").slice(0,4):[],tasks};
 }
 
 async function startJob(request, env, url) {
@@ -316,7 +338,7 @@ async function startJob(request, env, url) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       event_type: "workai_build",
-      client_payload: { id, prompt, kind, tasks, attachments, model: ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL, reasoning_effort: String(body.reasoning_effort || ""), system_prompt: String(body.system_prompt || "").slice(0, 8000), callback_origin: url.origin },
+      client_payload: { id, prompt, kind, tasks, attachments, model: validateModel(body.model,env), reasoning_effort: String(body.reasoning_effort || ""), system_prompt: String(body.system_prompt || "").slice(0, 8000), callback_origin: url.origin },
     }),
   });
   if (!dispatch.ok) return json({ error: "dispatch_failed", detail: (await dispatch.text()).slice(0, 500) }, 502, cors(request));
@@ -378,7 +400,7 @@ async function downloadResult(request, env, id) {
 }
 
 async function reviewJob(request,env,id){
-  const body=await request.json(),artifact=String(body.artifact||"файл"),prompt=String(body.prompt||"").slice(0,6000),model=ALLOWED_MODELS.has(body.model)?body.model:env.NVIDIA_MODEL;
+  const body=await request.json(),artifact=String(body.artifact||"файл"),prompt=String(body.prompt||"").slice(0,6000),model=validateModel(body.model,env);
   const summary=await nvidia(env,[{role:"system",content:"Ты проверяющий агент WorkAI. Сформулируй одним коротким абзацем реальное резюме проверки уже завершённой задачи: что было проверено перед выдачей результата. Не выдумывай детали, которых нет во входных данных, и не заявляй о незавершённых действиях."},{role:"user",content:`Задача: ${prompt}\nGitHub Actions завершился успешно. Опубликован и найден артефакт: ${artifact}. Архив/сборка прошли встроенную проверку workflow.`}],500,0.2,model);
   return json({id,reasoning_summary:summary.trim()},200,cors(request));
 }
@@ -392,15 +414,17 @@ export default {
     try {
       if (url.pathname === "/v1/chat" && request.method === "POST") {
         const body = await request.json();
+        const model = validateModel(body.model,env);
         const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
-        const model = ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL;
+        if(messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==="image_url"))&&!VISION_MODELS.has(model))throw new Error(`Model ${model} does not support image input`);
         const answer = await nvidia(env, [{ role: "system", content: `Ты WorkAI, точный русскоязычный ассистент. Текущая модель: ${model}. Если тебя спрашивают о модели, назови именно её.` }, ...messages], 2048, 0.45, model);
         return json({ answer, model }, 200, cors(request));
       }
       if (url.pathname === "/v1/chat/stream" && request.method === "POST") {
         const body = await request.json();
-        const model = ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL;
+        const model = validateModel(body.model,env);
         const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
+        if(messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==="image_url"))&&!VISION_MODELS.has(model))throw new Error(`Model ${model} does not support image input`);
         const custom = String(body.system_prompt || "").trim().slice(0, 8000);
         return new Response(executionStream(env,body,model,messages,custom), { status: 200, headers: { ...cors(request), "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "x-accel-buffering": "no" } });
       }

@@ -27,9 +27,9 @@ jobs:
       USER_SYSTEM_PROMPT: ${{ github.event.client_payload.system_prompt }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Reading request
+      - name: Check out source
         uses: actions/checkout@v4
-      - name: Creating files
+      - name: Generate requested files
         run: |
           python3 builder/generate.py fetch --job "$JOB_ID"
           if [ "$KIND" = "apk" ]; then

@@ -72,11 +72,12 @@ const val MODEL_ULTRA="nvidia/nemotron-3-ultra-550b-a55b"
 const val MODEL_AGNES_25="agnes-2.5-flash"
 const val MODEL_AGNES_30="agnes-3.0-flash"
 const val MODEL_COHERE_NORTH="north-mini-code-1-0"
+const val MODEL_ZEN_VISION="deepseek-v4-flash-vision-exp"
 const val MODEL_ZEN_ULTRA="nemotron-3-ultra-free"
 const val MODEL_ZEN_MIMO="mimo-v2.6-flash-free"
 const val MODEL_ZEN_MUSE_13="muse-spark-1.3-contributor-free"
 const val MODEL_ZEN_MUSE_12="muse-spark-1.2-contributor-free"
-val ALL_MODELS=setOf(MODEL_SUPER,MODEL_ULTRA,MODEL_AGNES_25,MODEL_AGNES_30,MODEL_COHERE_NORTH,MODEL_ZEN_ULTRA,MODEL_ZEN_MIMO,MODEL_ZEN_MUSE_13,MODEL_ZEN_MUSE_12)
+val ALL_MODELS=setOf(MODEL_SUPER,MODEL_ULTRA,MODEL_AGNES_25,MODEL_AGNES_30,MODEL_COHERE_NORTH,MODEL_ZEN_VISION,MODEL_ZEN_ULTRA,MODEL_ZEN_MIMO,MODEL_ZEN_MUSE_13,MODEL_ZEN_MUSE_12)
 
 class AgentViewModel(app:Application):AndroidViewModel(app) {
     private val prefs=app.getSharedPreferences("workai",0)
@@ -84,6 +85,7 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
     private val jobs=mutableMapOf<String,Job>()
     private val calls=mutableMapOf<String,Call>()
     private val handoffFiles=mutableMapOf<String,List<PendingAttachment>>()
+    private val pendingImages=mutableMapOf<Long,List<PendingAttachment>>()
     private val _ui=MutableStateFlow(load()); val ui:StateFlow<AppUiState> = _ui.asStateFlow()
     fun setInput(v:String){_ui.value=_ui.value.copy(input=v)}
     fun selectModel(v:String){
@@ -135,14 +137,17 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
         if(_ui.value.deviceToken.length<20){_ui.value=_ui.value.copy(settingsOpen=true,error="Введите WORKAI_DEVICE_TOKEN из GitHub Secrets");return}
         val title=if(chat.messages.isEmpty())prompt.take(42)else chat.title
         val cards=files.map{MessageAttachment(it.name,it.mime)}
-        update(chat.id){it.copy(title=title,messages=it.messages+ChatMessage(MessageRole.USER,rawPrompt,attachments=cards,context=prompt),updatedAt=System.currentTimeMillis())}
+        val sentAt=System.currentTimeMillis()
+        val images=files.filter{it.mime.lowercase() in setOf("image/png","image/jpeg","image/webp")}
+        if(images.isNotEmpty())pendingImages[sentAt]=images
+        update(chat.id){it.copy(title=title,messages=it.messages+ChatMessage(MessageRole.USER,rawPrompt,sentAt,attachments=cards,context=prompt),updatedAt=sentAt)}
         _ui.value=_ui.value.copy(input="",attachments=emptyList(),runningIds=_ui.value.runningIds+chat.id,error=null)
         ContextCompat.startForegroundService(getApplication(),Intent(getApplication(),AgentForegroundService::class.java))
         val creation=needsArtifact(rawPrompt,files)
         val handoff=rawPrompt.takeIf{chat.mode==WorkspaceMode.CHAT&&creation}
         if(handoff!=null)handoffFiles[handoff]=files
         update(chat.id){it.copy(messages=it.messages+ChatMessage(MessageRole.ASSISTANT,"",execution=ExecutionSession(),workHandoff=handoff))}
-        jobs[chat.id]=viewModelScope.launch{try{if(chat.mode==WorkspaceMode.WORK&&creation)runWork(chat.id,prompt,files)else runChat(chat.id,creation)}catch(e:CancellationException){finishExecution(chat.id,ExecutionState.CANCELLED,"Остановлено пользователем.")}catch(e:Throwable){appendEvent(chat.id,ExecutionEventType.ERROR,e.message?:"Не удалось выполнить запрос","error");finishExecution(chat.id,ExecutionState.FAILED);_ui.value=_ui.value.copy(error=e.message)}finally{calls.remove(chat.id);jobs.remove(chat.id);_ui.value=_ui.value.copy(runningIds=_ui.value.runningIds-chat.id);if(_ui.value.runningIds.isEmpty())getApplication<Application>().stopService(Intent(getApplication(),AgentForegroundService::class.java));persist()}}
+        jobs[chat.id]=viewModelScope.launch{try{if(chat.mode==WorkspaceMode.WORK&&creation)runWork(chat.id,prompt,files)else runChat(chat.id,creation)}catch(e:CancellationException){finishExecution(chat.id,ExecutionState.CANCELLED,"Остановлено пользователем.")}catch(e:Throwable){appendEvent(chat.id,ExecutionEventType.ERROR,e.message?:"Не удалось выполнить запрос","error");finishExecution(chat.id,ExecutionState.FAILED);_ui.value=_ui.value.copy(error=e.message)}finally{pendingImages.remove(sentAt);calls.remove(chat.id);jobs.remove(chat.id);_ui.value=_ui.value.copy(runningIds=_ui.value.runningIds-chat.id);if(_ui.value.runningIds.isEmpty())getApplication<Application>().stopService(Intent(getApplication(),AgentForegroundService::class.java));persist()}}
     }
     private fun needsArtifact(text:String,files:List<PendingAttachment>):Boolean{
         val mutation=Regex("(?i)(создай|сделай|собери|сгенерируй|сформируй|упакуй|заархивируй|измени|замени|перекрась|отредактируй|добавь|удали|перезалей|верни|отправь)").containsMatchIn(text)
@@ -151,7 +156,19 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
     }
     fun stop(){_ui.value.activeId.let{calls.remove(it)?.cancel();jobs[it]?.cancel()}}
 
-    private suspend fun runChat(id:String,creationRequest:Boolean=false){val chat=_ui.value.conversations.first{it.id==id};val a=JSONArray();chat.messages.dropLast(1).takeLast(30).forEach{a.put(JSONObject().put("role",if(it.role==MessageRole.USER)"user" else "assistant").put("content",it.context?:it.text))};streamApi(id,JSONObject().put("messages",a).put("model",_ui.value.selectedModel).put("reasoning_effort",_ui.value.reasoningEffort).put("system_prompt",_ui.value.systemPrompt).put("mode",chat.mode.name.lowercase()).put("creation_request",creationRequest))}
+    private suspend fun runChat(id:String,creationRequest:Boolean=false){
+        val chat=_ui.value.conversations.first{it.id==id};val a=JSONArray()
+        chat.messages.dropLast(1).takeLast(30).forEach{message->
+            val content=message.context?:message.text
+            val images=if(message.role==MessageRole.USER)message.createdAt.let{pendingImages[it]}.orEmpty() else emptyList()
+            val payload:Any=if(images.isNotEmpty()){
+                if(_ui.value.selectedModel!=MODEL_ZEN_VISION)error("Модель ${_ui.value.selectedModel} не поддерживает изображения. Выберите Zen DeepSeek Vision.")
+                JSONArray().put(JSONObject().put("type","text").put("text",content)).also{parts->images.forEach{file->parts.put(JSONObject().put("type","image_url").put("image_url",JSONObject().put("url","data:${file.mime};base64,${Base64.encodeToString(file.bytes,Base64.NO_WRAP)}")))}}
+            } else content
+            a.put(JSONObject().put("role",if(message.role==MessageRole.USER)"user" else "assistant").put("content",payload))
+        }
+        streamApi(id,JSONObject().put("messages",a).put("model",_ui.value.selectedModel).put("reasoning_effort",_ui.value.reasoningEffort).put("system_prompt",_ui.value.systemPrompt).put("mode",chat.mode.name.lowercase()).put("creation_request",creationRequest))
+    }
     private fun mutateExecution(id:String,save:Boolean=true,transform:(ChatMessage)->ChatMessage){update(id,save){c->val list=c.messages.toMutableList();val index=list.indexOfLast{it.role==MessageRole.ASSISTANT&&it.execution?.state==ExecutionState.RUNNING};if(index>=0)list[index]=transform(list[index]);c.copy(messages=list,updatedAt=System.currentTimeMillis())}}
     private fun appendEvent(id:String,type:ExecutionEventType,text:String,icon:String="terminal"){if(text.isBlank())return;mutateExecution(id){m->
         val session=m.execution?:return@mutateExecution m;val events=session.events.toMutableList();val last=events.lastOrNull()
@@ -184,13 +201,9 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
             Regex("(?i)\\bapk\\b|android[- ]?приложен|собер[иь].{0,30}приложен").containsMatchIn(prompt)->"apk"
             else->"zip"
         }
-        val payloadFiles=JSONArray();files.forEach{file->appendEvent(id,ExecutionEventType.TOOL,"Загружаю ${file.name}","file");val chunks=JSONArray();var offset=0;var index=0;while(offset<file.bytes.size){val end=minOf(offset+5*1024*1024,file.bytes.size);val part=file.bytes.copyOfRange(offset,end);val uploaded=uploadChunk(id,part,index);chunks.put(JSONObject().put("sha",uploaded.getString("sha")).put("sha256",uploaded.getString("sha256")).put("size",part.size).put("index",index));offset=end;index++};payloadFiles.put(JSONObject().put("name",file.name).put("mime",file.mime).put("chunks",chunks).put("size",file.bytes.size).put("sha256",sha256(file.bytes)));appendEvent(id,ExecutionEventType.STATUS,"Файл ${file.name} загружен и проверен","file")}
-        appendEvent(id,ExecutionEventType.TOOL,if(files.isEmpty())"Создаю файлы" else "Анализирую и изменяю файлы","build")
+        val payloadFiles=JSONArray();files.forEach{file->appendEvent(id,ExecutionEventType.STATUS,"Передаю ${file.name}","upload");val chunks=JSONArray();var offset=0;var index=0;while(offset<file.bytes.size){val end=minOf(offset+5*1024*1024,file.bytes.size);val part=file.bytes.copyOfRange(offset,end);val uploaded=uploadChunk(id,part,index);chunks.put(JSONObject().put("sha",uploaded.getString("sha")).put("sha256",uploaded.getString("sha256")).put("size",part.size).put("index",index));offset=end;index++};payloadFiles.put(JSONObject().put("name",file.name).put("mime",file.mime).put("chunks",chunks).put("size",file.bytes.size).put("sha256",sha256(file.bytes)));appendEvent(id,ExecutionEventType.STATUS,"Части файла ${file.name} переданы и подтверждены сервером","upload")}
         val started=api("/v1/jobs","POST",JSONObject().put("prompt",prompt).put("kind",kind).put("attachments",payloadFiles).put("model",_ui.value.selectedModel).put("reasoning_effort",_ui.value.reasoningEffort).put("system_prompt",_ui.value.systemPrompt),id)
-        started.optString("reasoning_summary").takeIf{it.isNotBlank()}?.let{appendEvent(id,ExecutionEventType.THINKING,it,"thinking")}
-        started.optString("intro").takeIf{it.isNotBlank()}?.let{appendEvent(id,ExecutionEventType.TEXT,it,"message")}
-        val skills=started.optJSONArray("skills")?:JSONArray();for(i in 0 until skills.length())appendEvent(id,ExecutionEventType.STATUS,"Использую ${skills.optString(i)}","build")
-        val job=started.getString("id");val t=started.optJSONArray("tasks")?:JSONArray();val todos=(0 until t.length()).map{WorkTodo(t.getString(it),if(it==0)TodoState.RUNNING else TodoState.WAITING)};update(id){it.copy(jobId=job,todos=todos)}
+        val job=started.getString("id");update(id){it.copy(jobId=job,todos=emptyList())}
         var lastStep=""
         repeat(300){
             delay(5000)
@@ -198,28 +211,17 @@ class AgentViewModel(app:Application):AndroidViewModel(app) {
             val status=s.optString("status")
             val conclusion=s.optString("conclusion")
             val steps=s.optJSONArray("steps")?:JSONArray()
-            update(id){c->c.copy(todos=updatedTodos(c.todos,steps,status,conclusion))}
             val current=(0 until steps.length()).map{steps.getJSONObject(it)}.lastOrNull{it.optString("status")=="in_progress"}?.optString("title").orEmpty()
             if(current.isNotBlank()&&current!=lastStep){appendEvent(id,ExecutionEventType.STATUS,current,"build");lastStep=current}
             if(status=="completed"){
                 if(conclusion!="success")error("Создание файла завершилось с ошибкой")
                 val a=s.optJSONObject("artifact")?:error("Файл не найден")
-                runCatching{api("/v1/jobs/$job/review","POST",JSONObject().put("prompt",prompt).put("artifact","${a.optString("name")} (${a.optLong("size")} байт)").put("model",_ui.value.selectedModel),id)}.getOrNull()?.optString("reasoning_summary")?.takeIf{it.isNotBlank()}?.let{appendEvent(id,ExecutionEventType.THINKING,it,"thinking")}
-                val artifact=WorkArtifact(job,a.getString("name"),a.optLong("size"));mutateExecution(id){it.copy(text="Готово. Файл создан, проверен и доступен для скачивания.",artifact=artifact)};appendEvent(id,ExecutionEventType.STATUS,"Готовый файл опубликован","file");finishExecution(id)
+                runCatching{api("/v1/jobs/$job/review","POST",JSONObject().put("prompt",prompt).put("artifact","${a.optString("name")} (${a.optLong("size")} байт)").put("model",_ui.value.selectedModel),id)}.getOrNull()?.optString("reasoning_summary")?.takeIf{it.isNotBlank()}?.let{appendEvent(id,ExecutionEventType.STATUS,it,"file")}
+                val artifact=WorkArtifact(job,a.getString("name"),a.optLong("size"));mutateExecution(id){it.copy(text="Файл собран и прошёл проверку архива или сборки.",artifact=artifact)};appendEvent(id,ExecutionEventType.STATUS,"Готовый файл опубликован","file");finishExecution(id)
                 return
             }
         }
         error("Превышено время ожидания сборки")
-    }
-
-    private fun updatedTodos(items:List<WorkTodo>,steps:JSONArray,status:String,conclusion:String):List<WorkTodo>{
-        if(status=="completed"&&conclusion=="success")return items.map{it.copy(state=TodoState.DONE)}
-        val actual=(0 until steps.length()).map{steps.optJSONObject(it)}.filter{it!=null&&it.optString("title") !in setOf("Set up job","Complete job")}
-        val completed=actual.count{it.optString("status")=="completed"&&it.optString("conclusion")=="success"}
-        val total=actual.size.coerceAtLeast(1)
-        val done=((completed.toDouble()/total)*items.size).toInt().coerceIn(0,items.size)
-        val active=if(done>=items.size)items.lastIndex else done
-        return items.mapIndexed{index,item->when{index<done->item.copy(state=TodoState.DONE);status=="completed"&&conclusion!="success"&&index==active->item.copy(state=TodoState.FAILED);index==active->item.copy(state=TodoState.RUNNING);else->item.copy(state=TodoState.WAITING)}}
     }
 
     fun downloadArtifact(a:WorkArtifact,share:Boolean){viewModelScope.launch{val mime=if(a.name.endsWith(".apk"))"application/vnd.android.package-archive" else "application/octet-stream";_ui.value=_ui.value.copy(downloadNotice=DownloadNotice(DownloadPhase.DOWNLOADING,a.name));try{val uri=withContext(Dispatchers.IO){client.newCall(builder("/v1/jobs/${a.jobId}/download").get().build()).execute().use{r->if(!r.isSuccessful)error("Download ${r.code}");val values=ContentValues().apply{put(MediaStore.Downloads.DISPLAY_NAME,a.name);put(MediaStore.Downloads.MIME_TYPE,mime);put(MediaStore.Downloads.IS_PENDING,1)};val resolver=getApplication<Application>().contentResolver;val u=resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI,values)?:error("Не удалось создать файл");resolver.openOutputStream(u)!!.use{o->r.body!!.byteStream().copyTo(o)};values.clear();values.put(MediaStore.Downloads.IS_PENDING,0);resolver.update(u,values,null,null);u}};_ui.value=_ui.value.copy(downloadNotice=DownloadNotice(DownloadPhase.COMPLETE,a.name,uri.toString(),mime));if(share){val i=Intent(Intent.ACTION_SEND).apply{type=mime;putExtra(Intent.EXTRA_STREAM,uri);addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)};getApplication<Application>().startActivity(Intent.createChooser(i,"Поделиться").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))}}catch(e:Throwable){_ui.value=_ui.value.copy(downloadNotice=null,error=e.message)}}}

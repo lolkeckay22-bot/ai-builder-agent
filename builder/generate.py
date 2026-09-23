@@ -34,9 +34,7 @@ def call_ai(system, user, max_tokens=6000):
     endpoint = "https://opencode.ai/zen/v1/responses" if responses else "https://opencode.ai/zen/v1/chat/completions" if zen else "https://api.cohere.com/compatibility/v1/chat/completions" if cohere else "https://apihub.agnes-ai.com/v1/chat/completions" if agnes else "https://integrate.api.nvidia.com/v1/chat/completions"
     key = os.environ.get("OPENCODE_API_KEY") if zen else os.environ.get("COHERE_API_KEY") if cohere else os.environ.get("AGNES_API_KEY") if agnes else os.environ.get("NVIDIA_API_KEY")
     model = MODEL
-    if (agnes or cohere or zen) and not key:
-        endpoint, key, model = "https://integrate.api.nvidia.com/v1/chat/completions", os.environ.get("NVIDIA_API_KEY"), "nvidia/nemotron-3-super-120b-a12b"
-    if not key: raise RuntimeError("AI provider key is not configured")
+    if not key: raise RuntimeError(f"{('OpenCode Zen' if zen else 'Cohere' if cohere else 'Agnes' if agnes else 'NVIDIA')}_API_KEY is not configured")
     messages=[{"role":"system","content":system},{"role":"user","content":user}]
     payload = json.dumps({"model":model,"input":messages,"max_output_tokens":max_tokens,"stream":False} if responses else {"model": model, "messages":messages, "temperature":0.35, "max_tokens":max_tokens, "stream":False}).encode()
     req = urllib.request.Request(endpoint, data=payload, headers={"Authorization":f"Bearer {key}", "Content-Type":"application/json", "Accept":"application/json"})
@@ -49,16 +47,7 @@ def call_ai(system, user, max_tokens=6000):
       except Exception as error:
         failure = error
         if attempt < 3: time.sleep(2 ** attempt)
-    try:
-        if not (agnes or cohere or zen) or endpoint.startswith("https://integrate.api.nvidia.com"): raise failure
-        fallback_key = os.environ.get("NVIDIA_API_KEY")
-        if not fallback_key: raise
-        fallback = json.dumps({"model":"nvidia/nemotron-3-super-120b-a12b","messages":[{"role":"system","content":system},{"role":"user","content":user}],"temperature":0.35,"max_tokens":max_tokens,"stream":False}).encode()
-        request = urllib.request.Request("https://integrate.api.nvidia.com/v1/chat/completions", data=fallback, headers={"Authorization":f"Bearer {fallback_key}","Content-Type":"application/json","Accept":"application/json"})
-        with urllib.request.urlopen(request, timeout=180) as response:
-            return json.load(response)["choices"][0]["message"]["content"]
-    except Exception:
-        raise failure
+    raise RuntimeError(f"{MODEL} request failed: {failure}") from failure
 
 def run_subagents(prompt, task_type):
     roles = [
@@ -124,6 +113,12 @@ def repair(log):
     fixed = re.sub(r"^```(?:kotlin)?\s*|\s*```$", "", fixed, flags=re.S)
     target.write_text(fixed)
 
+def confined(root, relative):
+    target=(root/str(relative)).resolve()
+    if target == root.resolve() or root.resolve() not in target.parents:
+        raise ValueError(f"Unsafe archive path: {relative}")
+    return target
+
 def make_archive(prompt, job_id, kind):
     out = Path("output"); out.mkdir(exist_ok=True)
     source = next((p for p in INPUT.iterdir() if p.suffix.lower() in (".mtz", ".zip")), None) if INPUT.exists() else None
@@ -131,8 +126,11 @@ def make_archive(prompt, job_id, kind):
         folder=Path("archive_work"); shutil.rmtree(folder,ignore_errors=True); folder.mkdir()
         with zipfile.ZipFile(source) as z:
             for info in z.infolist():
-                target=(folder/info.filename).resolve()
-                if str(target).startswith(str(folder.resolve())): z.extract(info,folder)
+                target=confined(folder, info.filename)
+                if info.is_dir(): target.mkdir(parents=True,exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True,exist_ok=True)
+                    with z.open(info) as src, target.open("wb") as dst: shutil.copyfileobj(src,dst)
         tree=[]
         for p in folder.rglob("*"):
             if p.is_file():
@@ -144,12 +142,11 @@ def make_archive(prompt, job_id, kind):
         advice=run_subagents(prompt, f"редактирование {kind.upper()}")
         plan=object_from(call_ai(system,f"ЗАДАЧА:\n{prompt}\n\nОТЧЁТЫ САБ-АГЕНТОВ:\n{advice}\n\nФАЙЛЫ:\n{json.dumps(tree,ensure_ascii=False)[:100000]}",6000))
         for rel in plan.get("deletes",[]):
-            target=(folder/str(rel)).resolve()
-            if str(target).startswith(str(folder.resolve())) and target.is_file(): target.unlink()
+            target=confined(folder, rel)
+            if target.is_file(): target.unlink()
         for edit in plan.get("edits",[]):
-            target=(folder/str(edit.get("path", ""))).resolve()
-            if str(target).startswith(str(folder.resolve())):
-                target.parent.mkdir(parents=True,exist_ok=True); target.write_text(str(edit.get("content","")))
+            target=confined(folder, edit.get("path", ""))
+            target.parent.mkdir(parents=True,exist_ok=True); target.write_text(str(edit.get("content","")))
         if kind=="mtz":
             if not (folder/"description.xml").exists(): (folder/"description.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><MIUI-Theme><title>WorkAI Theme</title><designer>WorkAI</designer><version>1.0</version><uiVersion>14</uiVersion></MIUI-Theme>')
             if not (folder/"theme_values.xml").exists(): (folder/"theme_values.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><MIUI_Theme_Values></MIUI_Theme_Values>')
@@ -162,10 +159,9 @@ def make_archive(prompt, job_id, kind):
     raw = object_from(call_ai('''Ты файловый агент WorkAI. Создай содержимое архива по запросу. Верни только JSON: {"archive_name":"имя без пути","files":[{"path":"безопасный/путь.txt","content":"полное содержимое"}]}. Добавь все явно запрошенные файлы. Если запрошен MTZ как тема HyperOS, создай валидные description.xml, theme_values.xml и README.txt. Никогда не отвечай, что не умеешь создавать файл.''', f"ЗАПРОС:\n{prompt}\n\nОТЧЁТЫ САБ-АГЕНТОВ:\n{advice}", 4000))
     folder=Path("archive_new"); shutil.rmtree(folder,ignore_errors=True); folder.mkdir(exist_ok=True)
     for item in raw.get("files", [])[:100]:
-        target=(folder/str(item.get("path") or "README.txt")).resolve()
-        if str(target).startswith(str(folder.resolve())):
-            target.parent.mkdir(parents=True,exist_ok=True);target.write_text(str(item.get("content") or ""))
-    if not any(folder.rglob("*")): (folder/"README.txt").write_text(prompt)
+        target=confined(folder, item.get("path") or "README.txt")
+        target.parent.mkdir(parents=True,exist_ok=True);target.write_text(str(item.get("content") or ""))
+    if not any(p.is_file() for p in folder.rglob("*")): raise ValueError("Model returned no files")
     if kind=="mtz":
         if not (folder/"description.xml").exists(): (folder/"description.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><MIUI-Theme><title>WorkAI Theme</title><designer>WorkAI</designer><version>1.0</version><uiVersion>14</uiVersion></MIUI-Theme>')
         if not (folder/"theme_values.xml").exists(): (folder/"theme_values.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><MIUI_Theme_Values></MIUI_Theme_Values>')
