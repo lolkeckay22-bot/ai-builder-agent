@@ -110,7 +110,7 @@ private fun Workspace(ui: AppUiState, vm: AgentViewModel, openHistory: () -> Uni
         )
         Composer(ui, vm)
     }
-    ui.downloadNotice?.let { DownloadBanner(it,vm::openDownload,vm::dismissDownload,Modifier.align(Alignment.BottomCenter).padding(horizontal=12.dp,bottom=112.dp)) }
+    ui.downloadNotice?.let { DownloadBanner(it,vm::openDownload,vm::dismissDownload,Modifier.align(Alignment.BottomCenter).padding(start=12.dp,end=12.dp,bottom=112.dp)) }
     }
 }
 
