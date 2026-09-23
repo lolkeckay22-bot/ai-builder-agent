@@ -399,9 +399,9 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
         IntelligenceSlider(ui,vm::selectReasoning)
         Text("Модель",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(start=28.dp,bottom=10.dp))
         Column(Modifier.padding(horizontal=20.dp).clip(RoundedCornerShape(24.dp)).background(Color(0xFF414141))){
-            listOf(MODEL_SUPER,MODEL_ULTRA,MODEL_AGNES_25,MODEL_AGNES_30).forEach{model->
+            listOf(MODEL_SUPER,MODEL_ULTRA,MODEL_AGNES_25,MODEL_AGNES_30,MODEL_COHERE_NORTH).forEach{model->
                 ModelRow(modelTitle(model),modelSubtitle(model),ui.selectedModel==model){vm.selectModel(model)}
-                if(model!=MODEL_AGNES_30)HorizontalDivider(color=Color(0xFF252525))
+                if(model!=MODEL_COHERE_NORTH)HorizontalDivider(color=Color(0xFF252525))
             }
         }
         Button(onClick={modelsOpen=false},modifier=Modifier.fillMaxWidth().padding(horizontal=28.dp),colors=ButtonDefaults.buttonColors(containerColor=Color.White,contentColor=Color.Black)){Text("Готово",fontWeight=FontWeight.Bold)}
@@ -409,14 +409,14 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
     }
 }
 
-private fun modelShort(model:String)=when(model){MODEL_ULTRA->"Ultra";MODEL_AGNES_25->"Agnes 2.5";MODEL_AGNES_30->"Agnes 3.0";else->"Super"}
-private fun modelTitle(model:String)=when(model){MODEL_ULTRA->"Nemotron Ultra 550B";MODEL_AGNES_25->"Agnes 2.5 Flash";MODEL_AGNES_30->"Agnes 3.0 Flash";else->"Nemotron Super 120B"}
-private fun modelSubtitle(model:String)=when(model){MODEL_ULTRA->"Максимальное качество NVIDIA";MODEL_AGNES_25->"Быстрая агентная модель · 512K";MODEL_AGNES_30->"Новая модель Agnes · доступ зависит от API";else->"Быстро и экономно"}
+private fun modelShort(model:String)=when(model){MODEL_ULTRA->"Ultra";MODEL_AGNES_25->"Agnes 2.5";MODEL_AGNES_30->"Agnes 3.0";MODEL_COHERE_NORTH->"North Code";else->"Super"}
+private fun modelTitle(model:String)=when(model){MODEL_ULTRA->"Nemotron Ultra 550B";MODEL_AGNES_25->"Agnes 2.5 Flash";MODEL_AGNES_30->"Agnes 3.0 Flash";MODEL_COHERE_NORTH->"Cohere North Mini Code";else->"Nemotron Super 120B"}
+private fun modelSubtitle(model:String)=when(model){MODEL_ULTRA->"Максимальное качество NVIDIA";MODEL_AGNES_25->"Быстрая агентная модель · 512K";MODEL_AGNES_30->"Новая модель Agnes · доступ зависит от API";MODEL_COHERE_NORTH->"Агентное программирование · 256K";else->"Быстро и экономно"}
 
 private fun reasoningLabel(value:String)=when(value){"none"->"Без размышления";"low"->"Низкий";"medium"->"Средний";else->"Высокий"}
 
 @Composable private fun IntelligenceSlider(ui:AppUiState,onSelect:(String)->Unit){
-    val values=if(ui.selectedModel==MODEL_ULTRA)listOf("none","medium","high") else if(ui.selectedModel.startsWith("agnes-"))listOf("none","low","medium","high") else listOf("none","low","high")
+    val values=if(ui.selectedModel==MODEL_ULTRA)listOf("none","medium","high") else if(ui.selectedModel.startsWith("agnes-")||ui.selectedModel==MODEL_COHERE_NORTH)listOf("none","low","medium","high") else listOf("none","low","high")
     Column(Modifier.padding(horizontal=28.dp,vertical=18.dp)){
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){values.forEach{Text(reasoningLabel(it),color=if(it==ui.reasoningEffort)Color.White else Color(0xFF8A8A8A),style=MaterialTheme.typography.labelMedium)}}
         Spacer(Modifier.height(14.dp))
