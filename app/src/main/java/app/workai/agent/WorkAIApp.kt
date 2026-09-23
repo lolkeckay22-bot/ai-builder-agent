@@ -168,6 +168,7 @@ private fun ConversationBody(
     ) {
         if (chat.messages.isEmpty()) item { EmptyState(chat.mode) }
         items(chat.messages, key={it.createdAt}) { message -> MessageBubble(message,onDownload,onShare,onAcceptWork,onDismissWork) }
+        if(chat.mode==WorkspaceMode.WORK&&chat.todos.isNotEmpty()) item(key="todo-${chat.id}"){TodoCard(chat.todos)}
         if (running && chat.messages.lastOrNull()?.role != MessageRole.ASSISTANT) item { TypingIndicator() }
     }
 }
@@ -190,30 +191,16 @@ private fun MessageBubble(message: ChatMessage,onDownload:(WorkArtifact)->Unit,o
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     var sourcesOpen by remember(message.createdAt) { mutableStateOf(false) }
-    var thinkingOpen by remember(message.createdAt) { mutableStateOf(message.execution?.state==ExecutionState.RUNNING) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (user) Alignment.End else Alignment.Start) {
         val session=message.execution
         if (!user && session != null) {
-            Surface(onClick = { thinkingOpen = !thinkingOpen }, color = Color.Transparent, shape = RoundedCornerShape(12.dp)) {
-                Row(Modifier.padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if(session.state==ExecutionState.RUNNING){Box(Modifier.size(13.dp).clip(CircleShape).background(Accent));Spacer(Modifier.width(8.dp))}
-                    val elapsed=((session.completedAt?:System.currentTimeMillis())-session.startedAt).coerceAtLeast(0)/1000
-                    Text(if(session.state==ExecutionState.RUNNING)"Размышление" else "Обработка заняла ${elapsed/60}m ${elapsed%60}s", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Icon(if (thinkingOpen) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(18.dp))
-                }
-            }
-            AnimatedVisibility(thinkingOpen) {
-                Column(Modifier.padding(start=4.dp,bottom=6.dp),verticalArrangement=Arrangement.spacedBy(7.dp)){
-                    session.events.filter{it.type==ExecutionEventType.THINKING}.forEach{event->
-                        Text(event.text, modifier=Modifier.padding(start=14.dp),style=MaterialTheme.typography.bodySmall,color=Color(0xFF9D9D9D))
-                    }
-                }
-            }
             Column(Modifier.padding(start=4.dp,bottom=8.dp),verticalArrangement=Arrangement.spacedBy(7.dp)){
-                session.events.filter{it.type!=ExecutionEventType.THINKING}.forEach{event->when(event.type){
-                    ExecutionEventType.TEXT->MarkdownText(event.text,Modifier.padding(vertical=2.dp))
+                session.events.forEach{event->when(event.type){
+                    ExecutionEventType.THINKING->if(event.text.isNotBlank()) ThinkingBlock(event,session.state==ExecutionState.RUNNING&&event===session.events.lastOrNull())
+                    ExecutionEventType.TEXT->MarkdownText(event.text,Modifier.padding(vertical=4.dp))
                     else->Row(verticalAlignment=Alignment.CenterVertically){Icon(when(event.icon){"search"->Icons.Default.Language;"file"->Icons.Default.FolderOpen;"error"->Icons.Default.Error;else->Icons.Default.Terminal},null,Modifier.size(19.dp),tint=if(event.type==ExecutionEventType.ERROR)MaterialTheme.colorScheme.error else Color(0xFFA4A4A4));Spacer(Modifier.width(9.dp));Text(event.text,color=Color(0xFFA4A4A4),style=MaterialTheme.typography.bodyMedium)}
                 }}
+                if(session.state!=ExecutionState.RUNNING){val elapsed=((session.completedAt?:System.currentTimeMillis())-session.startedAt).coerceAtLeast(0)/1000;Text("Обработка заняла ${elapsed/60}m ${elapsed%60}s",style=MaterialTheme.typography.bodySmall,color=Color(0xFF777777),modifier=Modifier.padding(top=3.dp))}
             }
         }
         if (message.attachments.isNotEmpty()) Column(Modifier.widthIn(max = 340.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -250,6 +237,18 @@ private fun MessageBubble(message: ChatMessage,onDownload:(WorkArtifact)->Unit,o
         }}
     }
     if(sourcesOpen) SourcesSheet(message.sources,onDismiss={sourcesOpen=false})
+}
+
+@Composable
+private fun ThinkingBlock(event:ExecutionEvent,running:Boolean){
+    var open by remember(event.at){mutableStateOf(running)}
+    LaunchedEffect(running){if(running)open=true}
+    Column{
+        Surface(onClick={open=!open},color=Color.Transparent,shape=RoundedCornerShape(10.dp)){
+            Row(Modifier.padding(horizontal=2.dp,vertical=4.dp),verticalAlignment=Alignment.CenterVertically){if(running){Box(Modifier.size(11.dp).clip(CircleShape).background(Accent));Spacer(Modifier.width(7.dp))};Text("Размышление",color=Color(0xFFAAAAAA),style=MaterialTheme.typography.bodyMedium);Icon(if(open)Icons.Default.ExpandLess else Icons.Default.ExpandMore,null,Modifier.size(18.dp),tint=Color(0xFFAAAAAA))}
+        }
+        AnimatedVisibility(open){Text(event.text,modifier=Modifier.padding(start=14.dp,end=8.dp,bottom=6.dp),style=MaterialTheme.typography.bodySmall,color=Color(0xFF9D9D9D))}
+    }
 }
 
 @Composable

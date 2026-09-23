@@ -27,10 +27,20 @@ jobs:
     steps:
       - name: Reading request
         uses: actions/checkout@v4
-      - name: Planning files
+      - name: Creating files
         run: |
           python3 builder/generate.py fetch --job "$JOB_ID"
-          python3 builder/generate.py generate --kind "$KIND" --job "$JOB_ID" --prompt "$PROMPT"
+          if [ "$KIND" = "apk" ]; then
+            python3 builder/generate.py generate --kind "$KIND" --job "$JOB_ID" --prompt "$PROMPT"
+          else
+            success=0
+            for attempt in 1 2 3; do
+              rm -rf output archive_new archive_work
+              if python3 builder/generate.py generate --kind "$KIND" --job "$JOB_ID" --prompt "$PROMPT" && python3 builder/generate.py verify --kind "$KIND"; then success=1; break; fi
+              echo "Recoverable archive error on attempt $attempt; regenerating"
+            done
+            test "$success" = 1
+          fi
       - name: Preparing Android SDK
         if: env.KIND == 'apk'
         uses: actions/setup-java@v5
@@ -55,7 +65,7 @@ jobs:
           cp generated/app/build/outputs/apk/debug/app-debug.apk "output/WorkAI-${JOB_ID}.apk"
       - name: Verifying artifact
         run: |
-          test -n "$(find output -type f -size +100c -print -quit)"
+          python3 builder/generate.py verify --kind "$KIND"
           sha256sum output/* | tee output/SHA256SUMS.txt
       - name: Publishing artifact
         run: |

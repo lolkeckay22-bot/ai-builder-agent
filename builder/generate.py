@@ -1,4 +1,4 @@
-import argparse, base64, hashlib, json, os, re, shutil, urllib.request, zipfile
+import argparse, base64, hashlib, json, os, re, shutil, time, urllib.request, zipfile, xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -36,17 +36,24 @@ def call_ai(system, user, max_tokens=6000):
     if not key: raise RuntimeError("AI provider key is not configured")
     payload = json.dumps({"model": model, "messages": [{"role":"system","content":system},{"role":"user","content":user}], "temperature":0.35, "max_tokens":max_tokens, "stream":False}).encode()
     req = urllib.request.Request(endpoint, data=payload, headers={"Authorization":f"Bearer {key}", "Content-Type":"application/json", "Accept":"application/json"})
-    try:
+    failure = None
+    for attempt in range(4):
+      try:
         with urllib.request.urlopen(req, timeout=180) as response:
             return json.load(response)["choices"][0]["message"]["content"]
-    except Exception:
-        if not agnes or endpoint.startswith("https://integrate.api.nvidia.com"): raise
+      except Exception as error:
+        failure = error
+        if attempt < 3: time.sleep(2 ** attempt)
+    try:
+        if not agnes or endpoint.startswith("https://integrate.api.nvidia.com"): raise failure
         fallback_key = os.environ.get("NVIDIA_API_KEY")
         if not fallback_key: raise
         fallback = json.dumps({"model":"nvidia/nemotron-3-super-120b-a12b","messages":[{"role":"system","content":system},{"role":"user","content":user}],"temperature":0.35,"max_tokens":max_tokens,"stream":False}).encode()
         request = urllib.request.Request("https://integrate.api.nvidia.com/v1/chat/completions", data=fallback, headers={"Authorization":f"Bearer {fallback_key}","Content-Type":"application/json","Accept":"application/json"})
         with urllib.request.urlopen(request, timeout=180) as response:
             return json.load(response)["choices"][0]["message"]["content"]
+    except Exception:
+        raise failure
 
 def run_subagents(prompt, task_type):
     roles = [
@@ -60,7 +67,10 @@ def run_subagents(prompt, task_type):
     with ThreadPoolExecutor(max_workers=len(roles)) as pool:
         futures = [pool.submit(ask, *role) for role in roles]
         for future in as_completed(futures):
-            role, report = future.result(); reports[role] = report
+            try:
+                role, report = future.result(); reports[role] = report
+            except Exception as error:
+                reports[roles[len(reports)][0] if len(reports)<len(roles) else "agent"] = f"Недоступен: {error}"
     return "\n\n".join(f"[{role}]\n{reports.get(role, '')}" for role, _ in roles)
 
 def object_from(text):
@@ -135,6 +145,9 @@ def make_archive(prompt, job_id, kind):
             target=(folder/str(edit.get("path", ""))).resolve()
             if str(target).startswith(str(folder.resolve())):
                 target.parent.mkdir(parents=True,exist_ok=True); target.write_text(str(edit.get("content","")))
+        if kind=="mtz":
+            if not (folder/"description.xml").exists(): (folder/"description.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><MIUI-Theme><title>WorkAI Theme</title><designer>WorkAI</designer><version>1.0</version><uiVersion>14</uiVersion></MIUI-Theme>')
+            if not (folder/"theme_values.xml").exists(): (folder/"theme_values.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><MIUI_Theme_Values></MIUI_Theme_Values>')
         suffix=".mtz" if kind=="mtz" else ".zip"
         with zipfile.ZipFile(out/f"WorkAI-{job_id}{suffix}","w",zipfile.ZIP_DEFLATED) as z:
             for p in folder.rglob("*"):
@@ -148,16 +161,43 @@ def make_archive(prompt, job_id, kind):
         if str(target).startswith(str(folder.resolve())):
             target.parent.mkdir(parents=True,exist_ok=True);target.write_text(str(item.get("content") or ""))
     if not any(folder.rglob("*")): (folder/"README.txt").write_text(prompt)
+    if kind=="mtz":
+        if not (folder/"description.xml").exists(): (folder/"description.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><MIUI-Theme><title>WorkAI Theme</title><designer>WorkAI</designer><version>1.0</version><uiVersion>14</uiVersion></MIUI-Theme>')
+        if not (folder/"theme_values.xml").exists(): (folder/"theme_values.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><MIUI_Theme_Values></MIUI_Theme_Values>')
     suffix=".mtz" if kind=="mtz" else ".zip"
     requested=re.sub(r"[^\w .-]","_",str(raw.get("archive_name") or f"WorkAI-{job_id}")).strip(" .") or f"WorkAI-{job_id}"
     requested=re.sub(r"\.(rar|zip|mtz)$","",requested,flags=re.I)
     with zipfile.ZipFile(out/f"{requested}{suffix}","w",zipfile.ZIP_DEFLATED) as z:
         for p in folder.rglob("*"): z.write(p,p.relative_to(folder))
 
+def verify_artifact(kind):
+    out=Path("output")
+    suffix=".apk" if kind=="apk" else ".mtz" if kind=="mtz" else ".zip"
+    files=[p for p in out.glob(f"*{suffix}") if p.is_file()]
+    if len(files)!=1: raise ValueError(f"Expected one {suffix} artifact, found {len(files)}")
+    artifact=files[0]
+    if artifact.stat().st_size<=100: raise ValueError("Artifact is empty or too small")
+    if kind in ("mtz","zip"):
+        with zipfile.ZipFile(artifact) as z:
+            bad=z.testzip()
+            if bad: raise ValueError(f"Corrupt archive member: {bad}")
+            names={n.rstrip("/") for n in z.namelist() if not n.endswith("/")}
+            if not names: raise ValueError("Archive contains no files")
+            if kind=="mtz":
+                required={"description.xml","theme_values.xml"}
+                missing=required-names
+                if missing: raise ValueError(f"MTZ missing required files: {', '.join(sorted(missing))}")
+                for name in required:
+                    data=z.read(name)
+                    if not data.strip(): raise ValueError(f"MTZ file is empty: {name}")
+                    ET.fromstring(data)
+    print(json.dumps({"artifact":artifact.name,"size":artifact.stat().st_size,"sha256":hashlib.sha256(artifact.read_bytes()).hexdigest()}))
+
 def main():
-    p=argparse.ArgumentParser(); p.add_argument("command",choices=["fetch","generate","repair"]); p.add_argument("--prompt",default=""); p.add_argument("--kind",default="apk"); p.add_argument("--job",default="job"); p.add_argument("--log",default="build.log"); a=p.parse_args()
+    p=argparse.ArgumentParser(); p.add_argument("command",choices=["fetch","generate","repair","verify"]); p.add_argument("--prompt",default=""); p.add_argument("--kind",default="apk"); p.add_argument("--job",default="job"); p.add_argument("--log",default="build.log"); a=p.parse_args()
     if a.command=="fetch": fetch_attachments(); return
     if a.command=="repair": repair(Path(a.log).read_text(errors="ignore")); return
+    if a.command=="verify": verify_artifact(a.kind); return
     if a.kind=="apk":
         name=android_template(a.prompt); Path("app_name.txt").write_text(name)
     else: make_archive(a.prompt,a.job,a.kind)
