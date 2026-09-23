@@ -1,6 +1,7 @@
 import argparse, base64, hashlib, json, os, re, shutil, time, urllib.request, zipfile, xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from workspace_tools import WorkspaceTools
 
 ROOT = Path("generated")
 MODEL = os.environ.get("MODEL") or "nvidia/nemotron-3-super-120b-a12b"
@@ -113,6 +114,32 @@ def object_from(text):
     if start < 0 or end <= start: raise ValueError("Model did not return JSON")
     return json.loads(text[start:end+1])
 
+def run_file_agent(prompt, folder, kind):
+    tools=WorkspaceTools(folder,emit_event)
+    catalog="list(path), read(path), search(path,query), write(path,content), create(path,content), edit(path,old,new), delete(path), move(path,destination), copy(path,destination), extract_archive(path,destination), create_archive(source,destination)"
+    system=(f"Ты файловый агент, редактирующий {kind.upper()} через реальные инструменты. Доступные инструменты: {catalog}. "
+            "Один ход — строго JSON {\"tool\":\"имя\",\"args\":{...}} либо {\"done\":true}. "
+            "Перед изменениями изучи файлы через list/read/search. После ошибки инструмента исправь параметры и продолжи. "
+            "Не утверждай об успехе до завершения нужных правок. Итоговую упаковку выполнит сборщик после твоего done.")
+    transcript=f"Задача: {prompt}\nСтартовые файлы: {json.dumps(tools.execute('list',{'path':'.'}),ensure_ascii=False)}"
+    for turn in range(30):
+        decision=object_from(call_ai(system,transcript[-26000:],1600))
+        if decision.get("done") is True:
+            if tools.changed: return
+            observation={"ok":False,"error":"No file changes were made; perform the requested edit before finishing"}
+        else:
+            name=decision.get("tool");args=decision.get("args")
+            emit_event("tool.started",name=str(name),label=f"{name}: {str(args)[:180]}",icon="file")
+            try:
+                result=tools.execute(name,args)
+                emit_event("tool.completed",name=str(name),label=f"{name} выполнен",icon="file")
+                observation={"ok":True,"result":result}
+            except Exception as error:
+                emit_event("tool.failed",name=str(name),label=f"{name}: {error}",icon="error")
+                observation={"ok":False,"error":str(error)}
+        transcript+=f"\nХод {turn+1}: {json.dumps(decision,ensure_ascii=False)}\nРезультат: {json.dumps(observation,ensure_ascii=False)[:14000]}"
+    raise RuntimeError("File agent exceeded 30 tool decisions without a verified edit")
+
 def safe_package(value):
     value = re.sub(r"[^a-zA-Z0-9_.]", "", value or "app.workai.generated").lower()
     return value if "." in value else "app.workai.generated"
@@ -158,19 +185,30 @@ def repair(log):
     target.write_text(fixed)
 
 def confined(root, relative):
-    target=(root/str(relative)).resolve()
+    value=str(relative)
+    if "\\" in value or Path(value).is_absolute() or ".." in Path(value).parts or re.match(r"^[A-Za-z]:",value):
+        raise ValueError(f"Unsafe archive path: {relative}")
+    target=(root/value).resolve()
     if target == root.resolve() or root.resolve() not in target.parents:
         raise ValueError(f"Unsafe archive path: {relative}")
     return target
 
 def make_archive(prompt, job_id, kind):
     out = Path("output"); out.mkdir(exist_ok=True)
-    source = next((p for p in INPUT.iterdir() if p.suffix.lower() in (".mtz", ".zip")), None) if INPUT.exists() else None
+    sources=[p for p in INPUT.iterdir() if p.suffix.lower() in (".mtz", ".zip")] if INPUT.exists() else []
+    if len(sources)>1: raise ValueError("Multiple source archives require an explicit selection")
+    source=sources[0] if sources else None
     if source:
         folder=Path("archive_work"); shutil.rmtree(folder,ignore_errors=True); folder.mkdir()
         emit_event("tool.started",name="extract_archive",label=f"Распаковываю {source.name}",icon="archive")
         with zipfile.ZipFile(source) as z:
-            for info in z.infolist():
+            infos=z.infolist()
+            if len(infos)>2000 or sum(info.file_size for info in infos)>200*1024*1024: raise ValueError("Archive exceeds extraction limits")
+            seen=set()
+            for info in infos:
+                normalized=Path(info.filename).as_posix().rstrip("/").casefold()
+                if normalized in seen: raise ValueError(f"Duplicate archive path: {info.filename}")
+                seen.add(normalized)
                 target=confined(folder, info.filename)
                 if info.is_dir(): target.mkdir(parents=True,exist_ok=True)
                 else:
@@ -178,25 +216,8 @@ def make_archive(prompt, job_id, kind):
                     with z.open(info) as src, target.open("wb") as dst: shutil.copyfileobj(src,dst)
         emit_event("tool.completed",name="extract_archive",label=f"Распакован {source.name}",icon="archive")
         complete_phase("inspect")
-        tree=[]
-        for p in folder.rglob("*"):
-            if p.is_file():
-                rel=p.relative_to(folder).as_posix(); row={"path":rel,"size":p.stat().st_size}
-                if p.suffix.lower() in (".xml",".json",".txt",".md",".html",".css",".js",".properties") and p.stat().st_size<120000:
-                    row["content"]=p.read_text(errors="ignore")[:30000]
-                    emit_event("file.read",path=rel,label=f"Прочитан {rel}",icon="file")
-                tree.append(row)
-        system='''Ты редактор ZIP/MTZ. Верни только JSON: {"edits":[{"path":"путь","content":"полное новое содержимое"}],"deletes":["путь"]}. Меняй только то, что требуется. Не выдумывай бинарные файлы и не используй ../. Для MTZ сохраняй совместимость HyperOS/MIUI.'''
-        advice=run_subagents(prompt, f"редактирование {kind.upper()}")
-        plan=object_from(call_ai(system,f"ЗАДАЧА:\n{prompt}\n\nОТЧЁТЫ САБ-АГЕНТОВ:\n{advice}\n\nФАЙЛЫ:\n{json.dumps(tree,ensure_ascii=False)[:100000]}",6000))
-        for rel in plan.get("deletes",[]):
-            target=confined(folder, rel)
-            if target.is_file(): target.unlink(); emit_event("tool.completed",name="delete",label=f"Удалён {rel}",icon="delete")
-        for edit in plan.get("edits",[]):
-            target=confined(folder, edit.get("path", ""))
-            target.parent.mkdir(parents=True,exist_ok=True); target.write_text(str(edit.get("content","")))
-            emit_event("file.write",path=str(edit.get("path","")),label=f"Изменён {edit.get('path','')}",icon="edit")
-        if plan.get("edits") or plan.get("deletes"): complete_phase("modify")
+        run_file_agent(prompt,folder,kind)
+        complete_phase("modify")
         if kind=="mtz":
             if not (folder/"description.xml").exists(): (folder/"description.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><MIUI-Theme><title>WorkAI Theme</title><designer>WorkAI</designer><version>1.0</version><uiVersion>14</uiVersion></MIUI-Theme>')
             if not (folder/"theme_values.xml").exists(): (folder/"theme_values.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><MIUI_Theme_Values></MIUI_Theme_Values>')

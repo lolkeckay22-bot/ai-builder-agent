@@ -221,7 +221,7 @@ async function nvidiaStream(env, messages, requestedModel, requestedEffort, tool
   const endpoint = responses?"https://opencode.ai/zen/v1/responses":zen?"https://opencode.ai/zen/v1/chat/completions":cohere ? "https://api.cohere.com/compatibility/v1/chat/completions" : agnes ? "https://apihub.agnes-ai.com/v1/chat/completions" : "https://integrate.api.nvidia.com/v1/chat/completions";
   const apiKey = zen?env.OPENCODE_API_KEY:cohere ? env.COHERE_API_KEY : agnes ? env.AGNES_API_KEY : env.NVIDIA_API_KEY;
   const provider=zen?"OpenCode Zen":cohere?"Cohere":agnes?"Agnes":"NVIDIA";
-  if(!apiKey)throw new Error(`${provider}_API_KEY is not configured`);
+  if(!apiKey)throw new Error(`${zen?"OPENCODE":cohere?"COHERE":agnes?"AGNES":"NVIDIA"}_API_KEY is not configured`);
   const allowed = model.includes("ultra") ? new Set(["none", "medium", "high"]) : new Set(["none", "low", "high"]);
   const reasoningEffort = allowed.has(requestedEffort) ? requestedEffort : (model.includes("ultra") ? "medium" : "low");
   let lastText = "";

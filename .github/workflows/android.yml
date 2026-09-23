@@ -20,6 +20,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+      - name: Test Worker and builder
+        run: |
+          node --test worker/test/agent.test.mjs
+          python3 -m py_compile builder/generate.py
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug
       - name: Verify APK
