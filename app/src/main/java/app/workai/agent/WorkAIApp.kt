@@ -168,6 +168,7 @@ private fun ConversationBody(
     ) {
         if (chat.messages.isEmpty()) item { EmptyState(chat.mode) }
         items(chat.messages, key={it.createdAt}) { message -> MessageBubble(message,onDownload,onShare,onAcceptWork,onDismissWork) }
+        if(chat.mode==WorkspaceMode.WORK&&chat.todos.isNotEmpty()) item(key="todo-${chat.id}"){TodoCard(chat.todos)}
         if (running && chat.messages.lastOrNull()?.role != MessageRole.ASSISTANT) item { TypingIndicator() }
     }
 }
