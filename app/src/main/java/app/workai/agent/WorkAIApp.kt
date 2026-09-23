@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -408,7 +410,7 @@ private fun Composer(ui: AppUiState, vm: AgentViewModel) {
         }
         IntelligenceSlider(ui,vm::selectReasoning)
         Text("Модель",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(start=28.dp,bottom=10.dp))
-        Column(Modifier.padding(horizontal=20.dp).clip(RoundedCornerShape(24.dp)).background(Color(0xFF414141))){
+        Column(Modifier.padding(horizontal=20.dp).heightIn(max=390.dp).clip(RoundedCornerShape(24.dp)).background(Color(0xFF414141)).verticalScroll(rememberScrollState())){
             listOf(MODEL_SUPER,MODEL_ULTRA,MODEL_AGNES_25,MODEL_AGNES_30,MODEL_COHERE_NORTH,MODEL_ZEN_ULTRA,MODEL_ZEN_MIMO,MODEL_ZEN_MUSE_13,MODEL_ZEN_MUSE_12).forEach{model->
                 ModelRow(modelTitle(model),modelSubtitle(model),ui.selectedModel==model){vm.selectModel(model)}
                 if(model!=MODEL_ZEN_MUSE_12)HorizontalDivider(color=Color(0xFF252525))

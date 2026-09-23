@@ -105,56 +105,6 @@ async function exchangeRate(base, quote) {
   const response=await fetch(`https://api.frankfurter.app/latest?from=${from}&to=${to}`);if(!response.ok)throw new Error(`exchange_${response.status}`);const data=await response.json();const rate=Number(data.rates?.[to]);if(!rate)throw new Error("exchange_rate_missing");return {ok:true,base:from,quote:to,rate,date:data.date,source:"https://frankfurter.app/"};
 }
 
-async function openWebPage(value) {
-  const url = safeHttpUrl(value); if (!url) throw new Error("unsafe_url");
-  const response = await fetch(url, { redirect: "follow", headers: { "user-agent": "Mozilla/5.0 WorkAI/0.1", accept: "text/html,text/plain,application/json" } });
-  const finalUrl = safeHttpUrl(response.url); if (!response.ok || !finalUrl) throw new Error(`open_${response.status}`);
-  const type = response.headers.get("content-type") || "";
-  if (!/(text|json|xml|html)/i.test(type)) throw new Error("unsupported_web_content");
-  return { url: finalUrl.href, text: plainText((await response.text()).slice(0, 300000)).slice(0, 16000) };
-}
-
-async function researchContext(env, messages, emit = () => {}) {
-  const latest = String(messages.at(-1)?.content || "").slice(0, 12000);
-  const today = new Date().toISOString();
-  const directBlocks=[]; const directActivities=[]; const sources=[];
-  if(/погод|weather|температур/i.test(latest)){
-    try{
-      const place=/киев|kyiv|kiev/i.test(latest)?"Киев":(latest.match(/(?:в|для)\s+([\p{L}-]{2,30})/iu)?.[1]||"Киев").trim();
-      emit({type:"tool_call",label:`Проверяю актуальную погоду в ${place}`,icon:"search"});
-      const geo=await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place)}&count=1&language=ru&format=json`);
-      const point=(await geo.json()).results?.[0];
-      if(point){
-        const weather=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${point.latitude}&longitude=${point.longitude}&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m&timezone=auto`);
-        const data=await weather.json();
-        directBlocks.push(`АКТУАЛЬНАЯ ПОГОДА OPEN-METEO: ${point.name}, ${point.country}\n${JSON.stringify(data.current)}\nИсточник: https://open-meteo.com/`);
-        sources.push({url:"https://open-meteo.com/",title:"Open-Meteo — прогноз погоды",domain:"open-meteo.com",snippet:`Актуальные погодные данные для ${point.name}`,favicon:"https://open-meteo.com/favicon.ico"});
-        directActivities.push({label:`Получена актуальная погода: ${point.name}`,icon:"search"});emit({type:"tool_result",text:`Погода для ${point.name} получена`,icon:"search"});
-      }
-    }catch{}
-  }
-  if(sources.length)return { context:directBlocks.join("\n\n"), activities:directActivities, sources };
-  const raw = await nvidia(env, [
-    { role: "system", content: `Ты маршрутизатор интернет-исследования WorkAI. Текущее серверное время: ${today}. Реши, нужен ли интернет для точного ответа. Используй его для свежих, меняющихся, нишевых данных, проверки фактов, источников и когда поиск явно улучшит ответ. Верни только JSON: {\"searches\":[\"...\"]}. Не более 3 запросов. Никогда не добавляй в запрос старый год. Для обычного письма, перевода, математики или данных только из сообщения верни пустой массив.` },
-    { role: "user", content: latest },
-  ], 500, 0.1);
-  const plan = parseJsonObject(raw); const queries = Array.isArray(plan?.searches) ? plan.searches.map(String).filter(Boolean).slice(0, 3) : [];
-  if (!queries.length) return { context:directBlocks.join("\n\n"), activities:directActivities, sources };
-  const blocks = [...directBlocks], activities = [...directActivities];
-  for (const query of queries) {
-    try {
-      activities.push({label:"Поиск в интернете…",icon:"search"});emit({type:"tool_call",label:"Поиск в интернете…",icon:"search"});
-      emit({type:"status",text:`Поиск по запросу «${query}»`,icon:"search"});
-      const results = await webSearch(query); activities.push({label:`Поиск по запросу «${query}»`,icon:"search"}); blocks.push(`ПОИСК: ${query}\n${results.map((r,i)=>`[${i+1}] ${r.title}\n${r.url}\n${r.snippet}`).join("\n")}`);
-      for (const result of results.slice(0, 2)) try { const page = await openWebPage(result.url); blocks.push(`ИСТОЧНИК: ${page.url}\n${page.text}`);const parsed=new URL(page.url);sources.push({url:page.url,title:result.title||parsed.hostname,domain:parsed.hostname.replace(/^www\./,""),snippet:result.snippet||page.text.slice(0,240),favicon:`${parsed.origin}/favicon.ico`}); } catch {}
-      emit({type:"tool_result",text:`Найдено результатов: ${results.length}`,icon:"search"});
-    } catch {}
-  }
-  const sourceCount=blocks.filter(x=>x.startsWith("ИСТОЧНИК:")).length;
-  if(sourceCount>0)activities.push({label:`Изучено источников: ${sourceCount}`,icon:"search"});
-  return { context:blocks.join("\n\n").slice(0, 50000), activities, sources:[...new Map(sources.map(s=>[s.url,s])).values()].slice(0,8) };
-}
-
 async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, requestedModel) {
   const selected=ALLOWED_MODELS.has(requestedModel)?requestedModel:(env.NVIDIA_MODEL||"nvidia/nemotron-3-super-120b-a12b");
   const agnes=selected.startsWith("agnes-"),cohere=selected==="north-mini-code-1-0",zen=ZEN_MODELS.has(selected),responses=ZEN_RESPONSES_MODELS.has(selected);
