@@ -22,14 +22,18 @@ jobs:
       KIND: ${{ github.event.client_payload.kind }}
       PROMPT: ${{ github.event.client_payload.prompt }}
       ATTACHMENTS: ${{ toJson(github.event.client_payload.attachments) }}
+      SKILLS: ${{ toJson(github.event.client_payload.skills) }}
+      TASKS: ${{ toJson(github.event.client_payload.tasks) }}
       MODEL: ${{ github.event.client_payload.model }}
       REASONING_EFFORT: ${{ github.event.client_payload.reasoning_effort }}
       USER_SYSTEM_PROMPT: ${{ github.event.client_payload.system_prompt }}
+      WORKAI_CALLBACK_ORIGIN: ${{ github.event.client_payload.callback_origin }}
+      WORKAI_DEVICE_TOKEN: ${{ secrets.WORKAI_DEVICE_TOKEN }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Reading request
+      - name: Check out source
         uses: actions/checkout@v4
-      - name: Creating files
+      - name: Generate requested files
         run: |
           python3 builder/generate.py fetch --job "$JOB_ID"
           if [ "$KIND" = "apk" ]; then
@@ -65,6 +69,7 @@ jobs:
           done
           test "$success" = 1
           cp generated/app/build/outputs/apk/debug/app-debug.apk "output/WorkAI-${JOB_ID}.apk"
+          python3 builder/generate.py build-complete --job "$JOB_ID"
       - name: Verifying artifact
         run: |
           python3 builder/generate.py verify --kind "$KIND"
@@ -73,6 +78,7 @@ jobs:
         run: |
           gh release delete "job-${JOB_ID}" --cleanup-tag --yes 2>/dev/null || true
           gh release create "job-${JOB_ID}" output/* --title "WorkAI result ${JOB_ID}" --notes "Generated and verified by WorkAI" --latest=false
+          python3 builder/generate.py publish --job "$JOB_ID"
       - name: Uploading backup
         uses: actions/upload-artifact@v4
         with:

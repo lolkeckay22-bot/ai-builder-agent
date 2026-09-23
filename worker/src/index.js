@@ -1,5 +1,30 @@
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
+export class JobEvents {
+  constructor(ctx){this.ctx=ctx;}
+  async fetch(request){
+    const events=await this.ctx.storage.get("events")||[];
+    if(request.method==="GET"){
+      const after=Math.max(0,Number(new URL(request.url).searchParams.get("after"))||0);
+      return json({events:events.filter(event=>event.seq>after),last_seq:events.at(-1)?.seq||0});
+    }
+    if(request.method==="POST"){
+      const payload=await request.json();const type=String(payload.type||"").slice(0,80);
+      if(!/^(todo\.(created|updated)|tool\.(started|progress|completed|failed)|file\.(read|write)|model\.thinking|assistant\.message|final\.answer|task\.cancelled)$/.test(type))return json({error:"invalid_event"},400);
+      const event={...payload,type,seq:(events.at(-1)?.seq||0)+1,at:Date.now()};
+      if(JSON.stringify(event).length>12000)return json({error:"event_too_large"},413);
+      events.push(event);await this.ctx.storage.put("events",events.slice(-300));
+      return json({seq:event.seq},201);
+    }
+    return json({error:"method_not_allowed"},405);
+  }
+}
+
+function eventStore(env,id){
+  if(!env.JOB_EVENTS)throw new Error("JOB_EVENTS binding is not configured");
+  return env.JOB_EVENTS.get(env.JOB_EVENTS.idFromName(id));
+}
+
 function json(data, status = 200, extra = {}) {
   return new Response(JSON.stringify(data), { status, headers: { ...JSON_HEADERS, ...extra } });
 }
@@ -25,13 +50,19 @@ const ALLOWED_MODELS = new Set([
   "agnes-2.5-flash",
   "agnes-3.0-flash",
   "north-mini-code-1-0",
+  "deepseek-v4-flash-vision-exp",
   "nemotron-3-ultra-free",
   "mimo-v2.6-flash-free",
   "muse-spark-1.3-contributor-free",
-  "muse-spark-1.2-contributor-free",
 ]);
-const ZEN_MODELS=new Set(["nemotron-3-ultra-free","mimo-v2.6-flash-free","muse-spark-1.3-contributor-free","muse-spark-1.2-contributor-free"]);
-const ZEN_RESPONSES_MODELS=new Set(["muse-spark-1.3-contributor-free","muse-spark-1.2-contributor-free"]);
+const VISION_MODELS=new Set(["deepseek-v4-flash-vision-exp"]);
+const ZEN_MODELS=new Set(["deepseek-v4-flash-vision-exp","nemotron-3-ultra-free","mimo-v2.6-flash-free","muse-spark-1.3-contributor-free"]);
+const ZEN_RESPONSES_MODELS=new Set(["muse-spark-1.3-contributor-free"]);
+function validateModel(requested, env) {
+  const model=requested || env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b";
+  if(!ALLOWED_MODELS.has(model))throw new Error(`Unsupported model: ${model}`);
+  return model;
+}
 function responsesInput(messages){const input=[];for(const m of messages){if(m.role==="tool"){input.push({type:"function_call_output",call_id:m.tool_call_id,output:String(m.content||"")});continue}if(m.tool_calls){if(m.content)input.push({role:m.role,content:m.content});for(const c of m.tool_calls)input.push({type:"function_call",call_id:c.id,name:c.function?.name||"",arguments:c.function?.arguments||"{}"});continue}input.push({role:m.role,content:m.content??""})}return input}
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -48,12 +79,50 @@ function decodeBase64(value) {
   return bytes;
 }
 
+function encodeBase64(bytes) {
+  let binary="";
+  for(let i=0;i<bytes.length;i+=32768) binary+=String.fromCharCode(...bytes.subarray(i,i+32768));
+  return btoa(binary);
+}
+
+async function hydrateAttachments(env,messages,model) {
+  const output=[];
+  for(const message of messages){
+    const items=Array.isArray(message.attachments)?message.attachments:[];
+    if(!items.length){output.push(message);continue;}
+    if(message.role!=="user")throw new Error("Attachments are only accepted on user messages");
+    if(!VISION_MODELS.has(model))throw new Error(`Model ${model} does not support image input`);
+    if(items.length>4)throw new Error("Too many images (maximum 4)");
+    const parts=[{type:"text",text:String(message.content||"")}];
+    for(const item of items){
+      const mime=String(item.mime||"").toLowerCase();
+      if(!["image/png","image/jpeg","image/webp"].includes(mime))throw new Error(`Unsupported image format: ${mime}`);
+      const expectedSize=Number(item.size);
+      const chunks=item.chunks;
+      if(!Number.isSafeInteger(expectedSize)||expectedSize<1||expectedSize>8*1024*1024||!Array.isArray(chunks)||chunks.length<1||chunks.length>4)throw new Error("Invalid image reference");
+      const combined=new Uint8Array(expectedSize);let offset=0;
+      for(const [index,chunk] of chunks.entries()){
+        if(!/^[0-9a-f]{40}$/.test(chunk.sha)||chunk.index!==index||!Number.isSafeInteger(chunk.size)||chunk.size<1||chunk.size>5*1024*1024)throw new Error("Invalid image chunk");
+        const response=await github(env,`/git/blobs/${chunk.sha}`);
+        if(!response.ok)throw new Error(`Image download ${response.status}`);
+        const blob=await response.json();const data=decodeBase64(String(blob.content||"").replace(/\s/g,""));
+        if(data.length!==chunk.size||await sha256Hex(data)!==chunk.sha256||offset+data.length>combined.length)throw new Error("Image chunk integrity mismatch");
+        combined.set(data,offset);offset+=data.length;
+      }
+      if(offset!==expectedSize||await sha256Hex(combined)!==item.sha256)throw new Error("Image integrity mismatch");
+      parts.push({type:"image_url",image_url:{url:`data:${mime};base64,${encodeBase64(combined)}`}});
+    }
+    output.push({role:"user",content:parts});
+  }
+  return output;
+}
+
 function safeHttpUrl(value) {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:") return null;
     const host = url.hostname.toLowerCase();
-    if (host === "localhost" || host.endsWith(".local") || /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return null;
+    if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.startsWith("[") || /^(0\.|10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return null;
     return url;
   } catch { return null; }
 }
@@ -70,8 +139,17 @@ function decodeXml(value) {
     .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
 }
 
-async function webSearch(query) {
-  const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, { headers: { "user-agent": "Mozilla/5.0 WorkAI/0.1" } });
+async function webSearch(query,signal,env) {
+  if(!query)throw new Error('search_query_missing');
+  if(env?.BRAVE_SEARCH_API_KEY){
+    const response=await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5`,{signal,headers:{accept:'application/json','x-subscription-token':env.BRAVE_SEARCH_API_KEY}});
+    if(!response.ok)throw new Error(`Brave Search HTTP ${response.status}: ${(await response.text()).slice(0,500)}`);
+    const data=await response.json();
+    const results=(data.web?.results||[]).filter(item=>safeHttpUrl(item.url)).slice(0,5).map(item=>({title:String(item.title||''),url:item.url,snippet:plainText(String(item.description||'')).slice(0,600)}));
+    if(!results.length)throw new Error('Brave Search returned no web results');
+    return results;
+  }
+  const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, { signal,headers: { "user-agent": "Mozilla/5.0 WorkAI/0.1" } });
   if (!response.ok) throw new Error(`search_${response.status}`);
   const html = await response.text();
   const results = [];
@@ -83,30 +161,31 @@ async function webSearch(query) {
     if (safeHttpUrl(href)) results.push({ title: plainText(match[2]), url: href, snippet: plainText(match[3]).slice(0, 600) });
   }
   if(results.length)return results;
-  const instant=await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`);
+  const instant=await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`,{signal});
   if(instant.ok){
     const data=await instant.json();
     const topics=(data.RelatedTopics||[]).flatMap(x=>x.Topics||[x]).filter(x=>x.FirstURL&&x.Text).slice(0,5);
     if(topics.length)return topics.map(x=>({title:String(x.Text).split(" - ")[0],url:x.FirstURL,snippet:String(x.Text).slice(0,600)}));
   }
-  const bing=await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&format=rss`,{headers:{"user-agent":"Mozilla/5.0 WorkAI/0.2","accept":"application/rss+xml,application/xml,text/xml"}});
+  const bing=await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&format=rss`,{signal,headers:{"user-agent":"Mozilla/5.0 WorkAI/0.2","accept":"application/rss+xml,application/xml,text/xml"}});
   if(!bing.ok)throw new Error(`search_fallback_${bing.status}`);
   const xml=await bing.text(),fallback=[];const item=/<item>([\s\S]*?)<\/item>/gi;let entry;
   while((entry=item.exec(xml))&&fallback.length<5){const part=entry[1];const title=part.match(/<title>([\s\S]*?)<\/title>/i)?.[1];const link=part.match(/<link>([\s\S]*?)<\/link>/i)?.[1];const description=part.match(/<description>([\s\S]*?)<\/description>/i)?.[1];const url=decodeXml(link);if(title&&safeHttpUrl(url))fallback.push({title:decodeXml(title),url,snippet:decodeXml(description).slice(0,600)});}
+  if(!fallback.length)throw new Error('No usable search results from DuckDuckGo or Bing; configure BRAVE_SEARCH_API_KEY for reliable search');
   return fallback;
 }
 
-async function exchangeRate(base, quote) {
+async function exchangeRate(base, quote, signal) {
   const from=String(base||"USD").toUpperCase().replace(/[^A-Z]/g,"").slice(0,3),to=String(quote||"UAH").toUpperCase().replace(/[^A-Z]/g,"").slice(0,3);
   if(from==="USD"&&to==="UAH"){
-    const response=await fetch("https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=USD&json");
+    const response=await fetch("https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=USD&json",{signal});
     if(response.ok){const item=(await response.json())?.[0];if(item?.rate)return {ok:true,base:from,quote:to,rate:Number(item.rate),date:item.exchangedate,source:"https://bank.gov.ua/ua/markets/exchangerates"};}
   }
-  const response=await fetch(`https://api.frankfurter.app/latest?from=${from}&to=${to}`);if(!response.ok)throw new Error(`exchange_${response.status}`);const data=await response.json();const rate=Number(data.rates?.[to]);if(!rate)throw new Error("exchange_rate_missing");return {ok:true,base:from,quote:to,rate,date:data.date,source:"https://frankfurter.app/"};
+  const response=await fetch(`https://api.frankfurter.app/latest?from=${from}&to=${to}`,{signal});if(!response.ok)throw new Error(`exchange_${response.status}`);const data=await response.json();const rate=Number(data.rates?.[to]);if(!rate)throw new Error("exchange_rate_missing");return {ok:true,base:from,quote:to,rate,date:data.date,source:"https://frankfurter.app/"};
 }
 
-async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, requestedModel) {
-  const selected=ALLOWED_MODELS.has(requestedModel)?requestedModel:(env.NVIDIA_MODEL||"nvidia/nemotron-3-super-120b-a12b");
+async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, requestedModel, signal) {
+  const selected=validateModel(requestedModel,env);
   const agnes=selected.startsWith("agnes-"),cohere=selected==="north-mini-code-1-0",zen=ZEN_MODELS.has(selected),responses=ZEN_RESPONSES_MODELS.has(selected);
   const model=agnes?(env.NVIDIA_MODEL||"nvidia/nemotron-3-super-120b-a12b"):selected;
   const endpoint=responses?"https://opencode.ai/zen/v1/responses":zen?"https://opencode.ai/zen/v1/chat/completions":cohere?"https://api.cohere.com/compatibility/v1/chat/completions":"https://integrate.api.nvidia.com/v1/chat/completions";
@@ -119,6 +198,7 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
     try {
       response = await fetch(endpoint, {
         method: "POST",
+        signal,
         headers: {
           "authorization": `Bearer ${apiKey}`,
           "content-type": "application/json",
@@ -137,6 +217,7 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
       const backoff = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 700 * (2 ** attempt) + Math.floor(Math.random() * 350);
       await sleep(Math.min(backoff, 9000));
     } catch (error) {
+      if(signal?.aborted)throw error;
       lastText = String(error?.message || error);
       if (attempt === 4) break;
       await sleep(700 * (2 ** attempt));
@@ -145,23 +226,23 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
   throw new Error(`${zen?"OpenCode Zen":cohere?"Cohere":"NVIDIA"} ${lastStatus || "network"}: ${lastText.slice(0, 300)}`);
 }
 
-async function nvidiaStream(env, messages, requestedModel, requestedEffort, tools = []) {
-  const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : (env.NVIDIA_MODEL || "nvidia/nemotron-3-super-120b-a12b");
+async function nvidiaStream(env, messages, requestedModel, requestedEffort, tools = [], signal) {
+  const model = validateModel(requestedModel,env);
   const agnes = model.startsWith("agnes-"),zen=ZEN_MODELS.has(model),responses=ZEN_RESPONSES_MODELS.has(model);
   const cohere = model === "north-mini-code-1-0";
   const endpoint = responses?"https://opencode.ai/zen/v1/responses":zen?"https://opencode.ai/zen/v1/chat/completions":cohere ? "https://api.cohere.com/compatibility/v1/chat/completions" : agnes ? "https://apihub.agnes-ai.com/v1/chat/completions" : "https://integrate.api.nvidia.com/v1/chat/completions";
   const apiKey = zen?env.OPENCODE_API_KEY:cohere ? env.COHERE_API_KEY : agnes ? env.AGNES_API_KEY : env.NVIDIA_API_KEY;
   const provider=zen?"OpenCode Zen":cohere?"Cohere":agnes?"Agnes":"NVIDIA";
-  if(!apiKey)throw new Error(`${provider}_API_KEY is not configured`);
+  if(!apiKey)throw new Error(`${zen?"OPENCODE":cohere?"COHERE":agnes?"AGNES":"NVIDIA"}_API_KEY is not configured`);
   const allowed = model.includes("ultra") ? new Set(["none", "medium", "high"]) : new Set(["none", "low", "high"]);
   const reasoningEffort = allowed.has(requestedEffort) ? requestedEffort : (model.includes("ultra") ? "medium" : "low");
   let lastText = "";
   for (let attempt = 0; attempt < 5; attempt++) {
     let response;
     try{response = await fetch(endpoint, {
-      method: "POST",headers: { "authorization": `Bearer ${apiKey}`, "content-type": "application/json", "accept": "text/event-stream" },
+      method: "POST",signal,headers: { "authorization": `Bearer ${apiKey}`, "content-type": "application/json", "accept": "text/event-stream" },
       body: JSON.stringify(responses?{model,input:responsesInput(messages),max_output_tokens:4096,stream:true,...(tools.length?{tools:tools.map(t=>({type:"function",name:t.function.name,description:t.function.description,parameters:t.function.parameters})),tool_choice:"auto"}:{})}:{ model, messages, temperature: 0.45, max_tokens: 4096, stream: true, ...(tools.length?{tools,tool_choice:"auto"}:{}), ...((agnes||cohere||zen)?{}:{reasoning_effort: reasoningEffort}) }),
-    });}catch(error){lastText=String(error?.message||error);if(attempt<4){await sleep(Math.min(700*(2**attempt),9000));continue}throw new Error(`${provider} network: ${lastText.slice(0,300)}`);}
+    });}catch(error){if(signal?.aborted)throw error;lastText=String(error?.message||error);if(attempt<4){await sleep(Math.min(700*(2**attempt),9000));continue}throw new Error(`${provider} network: ${lastText.slice(0,300)}`);}
     if (response.ok) return response;
     lastText = await response.text();
     if (![408,429,500,502,503,504].includes(response.status)) throw new Error(`${provider} ${response.status}: ${lastText.slice(0,300)}`);
@@ -212,32 +293,49 @@ async function relayProvider(upstream, send, turn, allowContentTerminated=false)
 }
 
 const CHAT_TOOLS=[
-  {type:"function",function:{name:"get_weather",description:"Получить текущую погоду. Используй только для погоды.",parameters:{type:"object",properties:{location:{type:"string"}},required:["location"]}}},
   {type:"function",function:{name:"get_exchange_rate",description:"Получить актуальный официальный курс валют. Используй для текущего курса валют вместо общего веб-поиска.",parameters:{type:"object",properties:{base:{type:"string",description:"Базовая валюта, например USD"},quote:{type:"string",description:"Валюта котировки, например UAH"}},required:["base","quote"]}}},
-  {type:"function",function:{name:"web_search",description:"Искать актуальную внешнюю информацию. Не используй для создания файлов, обычных знаний, письма, перевода или математики.",parameters:{type:"object",properties:{query:{type:"string"}},required:["query"]}}}
+  {type:"function",function:{name:"web_search",description:"Искать актуальные сведения в интернете, в том числе прогноз погоды. Если фрагментов мало, открой найденную страницу.",parameters:{type:"object",properties:{query:{type:"string"}},required:["query"]}}},
+  {type:"function",function:{name:"open_url",description:"Открыть HTTPS-результат поиска и получить читаемый текст страницы.",parameters:{type:"object",properties:{url:{type:"string"}},required:["url"]}}},
+  {type:"function",function:{name:"read_page",description:"Прочитать содержимое найденной HTTPS-страницы.",parameters:{type:"object",properties:{url:{type:"string"}},required:["url"]}}},
+  {type:"function",function:{name:"find_on_page",description:"Найти текст на HTTPS-странице и прочитать окружающий фрагмент.",parameters:{type:"object",properties:{url:{type:"string"},query:{type:"string"}},required:["url","query"]}}}
 ];
 
-async function executeChatTool(call,send){
+async function executeChatTool(call,send,signal,env){
   const name=String(call.function?.name||"");let args={};try{args=JSON.parse(call.function?.arguments||"{}")}catch{}
-  if(name==="get_weather"){
-    const location=String(args.location||"Киев").slice(0,80);send({type:"tool_call",id:call.id,name,label:`Проверяю погоду: ${location}`,icon:"search"});
-    try{const geo=await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1&language=ru&format=json`);const point=(await geo.json()).results?.[0];if(!point)throw new Error("location_not_found");const response=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${point.latitude}&longitude=${point.longitude}&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m&timezone=auto`);if(!response.ok)throw new Error(`weather_${response.status}`);const data=await response.json();const result={ok:true,location:point.name,country:point.country,current:data.current,source:"https://open-meteo.com/"};send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Погода для ${point.name} получена`,icon:"search"});return {result:JSON.stringify(result),sources:[{url:"https://open-meteo.com/",title:"Open-Meteo — прогноз погоды",domain:"open-meteo.com",snippet:`Текущая погода для ${point.name}`,favicon:"https://open-meteo.com/favicon.ico"}]};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Не удалось получить погоду: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
-  }
   if(name==="get_exchange_rate"){
     const base=String(args.base||"USD"),quote=String(args.quote||"UAH");send({type:"tool_call",id:call.id,name,label:`Проверяю курс ${base.toUpperCase()} к ${quote.toUpperCase()}`,icon:"search"});
-    try{const data=await exchangeRate(base,quote);const u=new URL(data.source);send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Курс ${data.base}/${data.quote} получен`,icon:"search"});return {result:JSON.stringify(data),sources:[{url:data.source,title:data.source.includes("bank.gov.ua")?"Национальный банк Украины — официальный курс":"Frankfurter — exchange rates",domain:u.hostname.replace(/^www\./,""),snippet:`${data.date}: 1 ${data.base} = ${data.rate} ${data.quote}`,favicon:`${u.origin}/favicon.ico`}]};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Курс не получен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
+    try{const data=await exchangeRate(base,quote,signal);const u=new URL(data.source);send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Курс ${data.base}/${data.quote} получен`,icon:"search"});return {result:JSON.stringify(data),sources:[{url:data.source,title:data.source.includes("bank.gov.ua")?"Национальный банк Украины — официальный курс":"Frankfurter — exchange rates",domain:u.hostname.replace(/^www\./,""),snippet:`${data.date}: 1 ${data.base} = ${data.rate} ${data.quote}`,favicon:`${u.origin}/favicon.ico`}]};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Курс не получен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
   }
   if(name==="web_search"){
     const query=String(args.query||"").trim().slice(0,300);send({type:"tool_call",id:call.id,name,label:`Поиск «${query}»`,icon:"search"});
-    try{const results=await webSearch(query);const sources=results.map(r=>{const u=new URL(r.url);return {url:r.url,title:r.title||u.hostname,domain:u.hostname.replace(/^www\./,""),snippet:r.snippet,favicon:`${u.origin}/favicon.ico`}});send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Найдено результатов: ${results.length}`,icon:"search"});return {result:JSON.stringify({ok:true,query,results}),sources};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Поиск не выполнен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
+    try{const results=await webSearch(query,signal,env);const sources=results.map(r=>{const u=new URL(r.url);return {url:r.url,title:r.title||u.hostname,domain:u.hostname.replace(/^www\./,""),snippet:r.snippet,favicon:`${u.origin}/favicon.ico`}});send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Найдено результатов: ${results.length}`,icon:"search"});return {result:JSON.stringify({ok:true,query,results}),sources};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Поиск не выполнен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
+  }
+  if(name==="open_url"||name==="read_page"||name==="find_on_page"){
+    const url=safeHttpUrl(String(args.url||""));send({type:"tool_call",id:call.id,name,label:`Читаю страницу: ${url?.hostname||"некорректный URL"}`,icon:"web"});
+    try{
+      if(!url)throw new Error("invalid_https_url");
+      const response=await fetch(url.href,{redirect:"follow",headers:{"accept":"text/html,text/plain,application/json","user-agent":"Mozilla/5.0 WorkAI/0.2"},signal:AbortSignal.any([AbortSignal.timeout(15000),signal].filter(Boolean))});
+      if(!response.ok)throw new Error(`page_http_${response.status}`);
+      if(!safeHttpUrl(response.url))throw new Error("unsafe_redirect");
+      const contentType=response.headers.get("content-type")||"";
+      if(!/text\/html|text\/plain|application\/json/.test(contentType))throw new Error("unsupported_page_type");
+      const content=plainText((await response.text()).slice(0,250000));let excerpt=content.slice(0,16000);
+      if(name==="find_on_page"){
+        const query=String(args.query||"").trim().slice(0,200);if(!query)throw new Error("empty_query");
+        const position=content.toLowerCase().indexOf(query.toLowerCase());excerpt=position<0?"Текст не найден":content.slice(Math.max(0,position-1200),position+5000);
+      }
+      const source={url:response.url,title:url.hostname,domain:url.hostname,snippet:excerpt.slice(0,300),favicon:`${url.origin}/favicon.ico`};
+      send({type:"tool_result",id:call.id,name,status:"tool_success",text:"Страница прочитана",icon:"web"});return {result:JSON.stringify({ok:true,url:response.url,content:excerpt}),sources:[source]};
+    }catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Не удалось прочитать страницу: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
   }
   const result=JSON.stringify({ok:false,error:"unknown_tool"});send({type:"tool_result",id:call.id,name,status:"fatal_error",text:`Неизвестный инструмент: ${name}`,icon:"error"});return {result,sources:[]};
 }
 
 function executionStream(env, body, model, messages, custom) {
   const encoder=new TextEncoder();
+  const abort=new AbortController();let cancelled=false;
   return new ReadableStream({async start(controller){
-    const send=value=>controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`));
+    const send=value=>{if(!cancelled)controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`))};
     try{
       const now=new Intl.DateTimeFormat("ru-RU",{timeZone:"Europe/Kyiv",dateStyle:"full",timeStyle:"long"}).format(new Date());
       const creationInstruction=body.creation_request&&String(body.mode)==="chat"?" Пользователь просит создать или изменить файл. Кратко и естественно объясни, что для фактического выполнения нужно перейти во вкладку «Работа»; не утверждай, что файл уже создаётся. Под ответом приложение покажет кнопки «Перейти» и «Пропустить». Перефразируй это самостоятельно, не используй шаблонную канцелярскую фразу.":"";
@@ -245,19 +343,19 @@ function executionStream(env, body, model, messages, custom) {
       const history=[system,...messages],allSources=[],toolMemory=[];let finalText="",finished=false,emptyTurns=0;
       for(let turn=1;turn<=8&&!finished;turn++){
         send({type:"model_turn_start",turn});
-        const upstream=await nvidiaStream(env,history,model,String(body.reasoning_effort||""),CHAT_TOOLS);
+        const upstream=await nvidiaStream(env,history,model,String(body.reasoning_effort||""),CHAT_TOOLS,abort.signal);
         const generated=await relayProvider(upstream,send,turn,ZEN_RESPONSES_MODELS.has(model));
         const assistant={role:"assistant",content:generated.content||null};if(generated.toolCalls.length)assistant.tool_calls=generated.toolCalls;history.push(assistant);
-        if(!generated.toolCalls.length){finalText=generated.content.trim();if(!finalText){emptyTurns++;if(emptyTurns<2){history.push({role:"user",content:"Ты завершил ход без ответа. Продолжи: используй уже полученные tool results и сформируй содержательный финальный ответ пользователю. Не вызывай повторно тот же поиск без изменения запроса."});continue}const fallback=await nvidia(env,[...history,{role:"user",content:"Сформируй финальный ответ по истории и результатам инструментов. Если данных недостаточно, конкретно объясни это и предложи полезный следующий шаг."}],2048,0.35);finalText=fallback.trim()||"Не удалось получить содержательный ответ от выбранной модели. Попробуйте повторить запрос или выбрать другую модель.";}send({type:"text_delta",delta:finalText});finished=true;break;}
+        if(!generated.toolCalls.length){finalText=generated.content.trim();if(!finalText){emptyTurns++;if(emptyTurns<2){history.push({role:"user",content:"Ты завершил ход без ответа. Продолжи: используй уже полученные tool results и сформируй содержательный финальный ответ пользователю. Не вызывай повторно тот же поиск без изменения запроса."});continue}const fallback=await nvidia(env,[...history,{role:"user",content:"Сформируй финальный ответ по истории и результатам инструментов. Если данных недостаточно, конкретно объясни это и предложи полезный следующий шаг."}],2048,0.35,model,abort.signal);finalText=fallback.trim();if(!finalText)throw new Error("selected_model_returned_empty_answer");}send({type:"text_delta",delta:finalText});finished=true;break;}
         if(generated.content.trim())send({type:"intermediate",text:generated.content.trim(),turn});
-        for(const call of generated.toolCalls){const executed=await executeChatTool(call,send);history.push({role:"tool",tool_call_id:call.id,name:call.function.name,content:executed.result});toolMemory.push(`${call.function.name}: ${executed.result}`);allSources.push(...executed.sources);}
+        for(const call of generated.toolCalls){const executed=await executeChatTool(call,send,abort.signal,env);history.push({role:"tool",tool_call_id:call.id,name:call.function.name,content:executed.result});toolMemory.push(`${call.function.name}: ${executed.result}`);allSources.push(...executed.sources);}
       }
       if(!finished)throw new Error("agent_turn_limit_reached");
       const unique=[...new Map(allSources.map(s=>[s.url,s])).values()].slice(0,8);if(unique.length)send({type:"sources",items:unique});
       if(toolMemory.length)send({type:"context_snapshot",text:`${finalText}\n\nРезультаты инструментов этой сессии:\n${toolMemory.join("\n")}`});
-      send({type:"task_completed"});send({type:"done"});controller.close();
-    }catch(error){send({type:"error",message:String(error?.message||error)});controller.close()}
-  }});
+      if(!cancelled){send({type:"task_completed"});send({type:"done"});controller.close()}
+    }catch(error){if(!cancelled){send({type:"error",message:String(error?.message||error)});controller.close()}}
+  },cancel(){cancelled=true;abort.abort()}});
 }
 
 async function github(env, path, init = {}) {
@@ -283,12 +381,15 @@ function parseJsonObject(text) {
 
 async function createPlan(env, prompt, kind, model) {
   const raw = await nvidia(env, [
-    { role: "system", content: "Ты планировщик WorkAI. Верни только JSON без markdown: {\"reasoning_summary\":\"краткое фактическое резюме выбранного подхода и почему нужны указанные инструменты\",\"intro\":\"что именно ты сделаешь, одной естественной фразой без заявления об успехе\",\"skills\":[\"название подходящего навыка\"],\"tasks\":[\"...\"]}. Указывай только действительно подходящие навыки из file-creator, file-analysis, archive-editor, mtz-editor, android-app-builder. Никогда не выбирай web-research для создания файлов. Нужно 3-7 конкретных проверяемых этапов. Последние этапы: сборка, проверка, публикация файла." },
+    { role: "system", content: "Ты планировщик WorkAI. Верни только JSON без markdown: {\"skills\":[\"название подходящего навыка\"],\"tasks\":[{\"title\":\"конкретное действие для задачи\",\"phase\":\"inspect|modify|build|verify|publish\"}]}. Указывай только подходящие навыки из file-creator, file-analysis, archive-editor, mtz-editor, android-app-builder. Выбирай только необходимые этапы, 2-7 задач, не повторяй phase. Этапы должны отражать конкретный запрос, а phase связывает каждый пункт с реальным действием. Заверши план фазами verify и publish. Не выдумывай выполненных действий." },
     { role: "user", content: `Тип результата: ${kind}. Задача: ${prompt}` },
   ], 900, 0.25, model);
   const parsed = parseJsonObject(raw);
-  const tasks = Array.isArray(parsed?.tasks) ? parsed.tasks.map(String).filter(Boolean).slice(0, 7) : [];
-  return {reasoningSummary:String(parsed?.reasoning_summary||"").trim(),intro:String(parsed?.intro||"Составлю план и начну выполнение задачи."),skills:Array.isArray(parsed?.skills)?parsed.skills.map(String).filter(Boolean).filter(x=>x!=="web-research").slice(0,4):[],tasks:tasks.length?tasks:["Анализ запроса","Создание файлов","Сборка","Проверка","Публикация файла"]};
+  const phases=new Set(["inspect","modify","build","verify","publish"]);
+  const tasks=Array.isArray(parsed?.tasks)?parsed.tasks.filter(t=>t&&typeof t.title==="string"&&t.title.trim()&&phases.has(t.phase)).map(t=>({title:t.title.trim().slice(0,160),phase:t.phase})).slice(0,7):[];
+  if(new Set(tasks.map(t=>t.phase)).size!==tasks.length)throw new Error("model_plan_duplicate_phases");
+  if(!tasks.length)throw new Error("model_plan_missing_tasks");
+  return {reasoningSummary:String(parsed?.reasoning_summary||"").trim(),intro:String(parsed?.intro||""),skills:Array.isArray(parsed?.skills)?parsed.skills.map(String).filter(Boolean).filter(x=>x!=="web-research").slice(0,4):[],tasks};
 }
 
 async function startJob(request, env, url) {
@@ -300,6 +401,7 @@ async function startJob(request, env, url) {
   const id = crypto.randomUUID();
   const plan = await createPlan(env, prompt, kind, body.model);
   const tasks = plan.tasks;
+  const eventLog=eventStore(env,id);
   const attachments = [];
   for (const item of (Array.isArray(body.attachments) ? body.attachments : []).slice(0, 8)) {
     const name = String(item?.name || "file.bin").replace(/[^\p{L}\p{N}._ -]/gu, "_").slice(0, 120);
@@ -311,12 +413,13 @@ async function startJob(request, env, url) {
     if (size < 1 || size > 100 * 1024 * 1024 || chunks.reduce((sum, c) => sum + c.size, 0) !== size || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error(`invalid_attachment_integrity:${name}`);
     attachments.push({ name, mime, chunks, size, sha256 });
   }
+  await eventLog.fetch(new Request(`https://events.internal/${id}`,{method:"POST",body:JSON.stringify({type:"todo.created",tasks})}));
   const dispatch = await github(env, "/dispatches", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       event_type: "workai_build",
-      client_payload: { id, prompt, kind, tasks, attachments, model: ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL, reasoning_effort: String(body.reasoning_effort || ""), system_prompt: String(body.system_prompt || "").slice(0, 8000), callback_origin: url.origin },
+      client_payload: { id, prompt, kind, tasks, skills:plan.skills, attachments, model: validateModel(body.model,env), reasoning_effort: String(body.reasoning_effort || ""), system_prompt: String(body.system_prompt || "").slice(0, 8000), callback_origin: url.origin },
     }),
   });
   if (!dispatch.ok) return json({ error: "dispatch_failed", detail: (await dispatch.text()).slice(0, 500) }, 502, cors(request));
@@ -349,7 +452,24 @@ async function jobStatus(request, env, id) {
       if (asset) artifact = { name: asset.name, size: asset.size, download: `/v1/jobs/${id}/download` };
     }
   }
-  return json({ id, status: run.status, conclusion: run.conclusion, runUrl: run.html_url, steps, artifact }, 200, cors(request));
+  const eventResponse=await eventStore(env,id).fetch(new Request(`https://events.internal/${id}`));
+  const eventLog=await eventResponse.json();
+  return json({ id, status: run.status, conclusion: run.conclusion, runUrl: run.html_url, steps, artifact, events:eventLog.events }, 200, cors(request));
+}
+
+async function cancelJob(request,env,id){
+  let run;
+  for(let attempt=0;attempt<8;attempt++){
+    run=await findRun(env,id);
+    if(run)break;
+    await sleep(750);
+  }
+  if(!run)return json({error:"workflow_not_found",detail:"Сборка ещё не появилась в GitHub Actions"},409,cors(request));
+  if(run.status==="completed")return json({error:"workflow_already_completed",conclusion:run.conclusion},409,cors(request));
+  const response=await github(env,`/actions/runs/${run.id}/cancel`,{method:"POST"});
+  if(!response.ok)return json({error:"cancel_failed",detail:(await response.text()).slice(0,300)},response.status,cors(request));
+  await eventStore(env,id).fetch(new Request(`https://events.internal/${id}`,{method:"POST",body:JSON.stringify({type:"task.cancelled",label:"Отмена сборки запрошена в GitHub Actions"})}));
+  return json({status:"cancellation_requested",run_id:run.id},202,cors(request));
 }
 
 async function downloadResult(request, env, id) {
@@ -377,11 +497,6 @@ async function downloadResult(request, env, id) {
   });
 }
 
-async function reviewJob(request,env,id){
-  const body=await request.json(),artifact=String(body.artifact||"файл"),prompt=String(body.prompt||"").slice(0,6000),model=ALLOWED_MODELS.has(body.model)?body.model:env.NVIDIA_MODEL;
-  const summary=await nvidia(env,[{role:"system",content:"Ты проверяющий агент WorkAI. Сформулируй одним коротким абзацем реальное резюме проверки уже завершённой задачи: что было проверено перед выдачей результата. Не выдумывай детали, которых нет во входных данных, и не заявляй о незавершённых действиях."},{role:"user",content:`Задача: ${prompt}\nGitHub Actions завершился успешно. Опубликован и найден артефакт: ${artifact}. Архив/сборка прошли встроенную проверку workflow.`}],500,0.2,model);
-  return json({id,reasoning_summary:summary.trim()},200,cors(request));
-}
 
 export default {
   async fetch(request, env) {
@@ -392,15 +507,17 @@ export default {
     try {
       if (url.pathname === "/v1/chat" && request.method === "POST") {
         const body = await request.json();
-        const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
-        const model = ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL;
+        const model = validateModel(body.model,env);
+        const messages = await hydrateAttachments(env,Array.isArray(body.messages) ? body.messages.slice(-30) : [],model);
+        if(messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==="image_url"))&&!VISION_MODELS.has(model))throw new Error(`Model ${model} does not support image input`);
         const answer = await nvidia(env, [{ role: "system", content: `Ты WorkAI, точный русскоязычный ассистент. Текущая модель: ${model}. Если тебя спрашивают о модели, назови именно её.` }, ...messages], 2048, 0.45, model);
         return json({ answer, model }, 200, cors(request));
       }
       if (url.pathname === "/v1/chat/stream" && request.method === "POST") {
         const body = await request.json();
-        const model = ALLOWED_MODELS.has(body.model) ? body.model : env.NVIDIA_MODEL;
-        const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
+        const model = validateModel(body.model,env);
+        const messages = await hydrateAttachments(env,Array.isArray(body.messages) ? body.messages.slice(-30) : [],model);
+        if(messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==="image_url"))&&!VISION_MODELS.has(model))throw new Error(`Model ${model} does not support image input`);
         const custom = String(body.system_prompt || "").trim().slice(0, 8000);
         return new Response(executionStream(env,body,model,messages,custom), { status: 200, headers: { ...cors(request), "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "x-accel-buffering": "no" } });
       }
@@ -414,9 +531,16 @@ export default {
         return json({sha:(await created.json()).sha,sha256:actual,size:bytes.byteLength,index:Number(body.index || 0)},201,cors(request));
       }
       if (url.pathname === "/v1/jobs" && request.method === "POST") return await startJob(request, env, url);
+      const cancelPath=url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)\/cancel$/);
+      if(cancelPath&&request.method==="POST")return await cancelJob(request,env,cancelPath[1]);
+      const eventPath=url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)\/events$/);
+      if(eventPath && (request.method==="GET"||request.method==="POST")){
+        const store=eventStore(env,eventPath[1]);
+        const response=await store.fetch(new Request(`https://events.internal/${eventPath[1]}${url.search}`,{method:request.method,...(request.method==="POST"?{body:await request.text()}: {})}));
+        return new Response(response.body,{status:response.status,headers:{...cors(request),...JSON_HEADERS}});
+      }
       const match = url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)(\/download)?$/);
       if (match && request.method === "GET") return match[2] ? await downloadResult(request, env, match[1]) : await jobStatus(request, env, match[1]);
-      const review=url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)\/review$/);if(review&&request.method==="POST")return await reviewJob(request,env,review[1]);
       return json({ error: "not_found" }, 404, cors(request));
     } catch (error) {
       return json({ error: "internal_error", detail: String(error?.message || error).slice(0, 700) }, 500, cors(request));

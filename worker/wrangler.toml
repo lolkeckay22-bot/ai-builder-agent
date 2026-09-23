@@ -6,3 +6,11 @@ compatibility_date = "2026-09-01"
 GITHUB_OWNER = "lolkeckay22-bot"
 GITHUB_REPO = "ai-builder-agent"
 NVIDIA_MODEL = "nvidia/nemotron-3-super-120b-a12b"
+
+[[durable_objects.bindings]]
+name = "JOB_EVENTS"
+class_name = "JobEvents"
+
+[[migrations]]
+tag = "v1-job-events"
+new_sqlite_classes = ["JobEvents"]
