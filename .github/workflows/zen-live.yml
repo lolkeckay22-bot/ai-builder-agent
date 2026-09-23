@@ -1,0 +1,21 @@
+name: Zen provider live checks
+on:
+  push:
+    branches: ["codex/**"]
+    paths:
+      - 'builder/zen_live_check.py'
+      - '.github/workflows/zen-live.yml'
+      - 'worker/src/index.js'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Zen models, streaming, and vision
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: python3 builder/zen_live_check.py

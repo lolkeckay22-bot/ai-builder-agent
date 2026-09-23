@@ -122,7 +122,7 @@ function safeHttpUrl(value) {
     const url = new URL(value);
     if (url.protocol !== "https:") return null;
     const host = url.hostname.toLowerCase();
-    if (host === "localhost" || host.endsWith(".local") || /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return null;
+    if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.startsWith("[") || /^(0\.|10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return null;
     return url;
   } catch { return null; }
 }
@@ -139,8 +139,17 @@ function decodeXml(value) {
     .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
 }
 
-async function webSearch(query) {
-  const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, { headers: { "user-agent": "Mozilla/5.0 WorkAI/0.1" } });
+async function webSearch(query,signal,env) {
+  if(!query)throw new Error('search_query_missing');
+  if(env?.BRAVE_SEARCH_API_KEY){
+    const response=await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5`,{signal,headers:{accept:'application/json','x-subscription-token':env.BRAVE_SEARCH_API_KEY}});
+    if(!response.ok)throw new Error(`Brave Search HTTP ${response.status}: ${(await response.text()).slice(0,500)}`);
+    const data=await response.json();
+    const results=(data.web?.results||[]).filter(item=>safeHttpUrl(item.url)).slice(0,5).map(item=>({title:String(item.title||''),url:item.url,snippet:plainText(String(item.description||'')).slice(0,600)}));
+    if(!results.length)throw new Error('Brave Search returned no web results');
+    return results;
+  }
+  const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, { signal,headers: { "user-agent": "Mozilla/5.0 WorkAI/0.1" } });
   if (!response.ok) throw new Error(`search_${response.status}`);
   const html = await response.text();
   const results = [];
@@ -152,29 +161,30 @@ async function webSearch(query) {
     if (safeHttpUrl(href)) results.push({ title: plainText(match[2]), url: href, snippet: plainText(match[3]).slice(0, 600) });
   }
   if(results.length)return results;
-  const instant=await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`);
+  const instant=await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`,{signal});
   if(instant.ok){
     const data=await instant.json();
     const topics=(data.RelatedTopics||[]).flatMap(x=>x.Topics||[x]).filter(x=>x.FirstURL&&x.Text).slice(0,5);
     if(topics.length)return topics.map(x=>({title:String(x.Text).split(" - ")[0],url:x.FirstURL,snippet:String(x.Text).slice(0,600)}));
   }
-  const bing=await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&format=rss`,{headers:{"user-agent":"Mozilla/5.0 WorkAI/0.2","accept":"application/rss+xml,application/xml,text/xml"}});
+  const bing=await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&format=rss`,{signal,headers:{"user-agent":"Mozilla/5.0 WorkAI/0.2","accept":"application/rss+xml,application/xml,text/xml"}});
   if(!bing.ok)throw new Error(`search_fallback_${bing.status}`);
   const xml=await bing.text(),fallback=[];const item=/<item>([\s\S]*?)<\/item>/gi;let entry;
   while((entry=item.exec(xml))&&fallback.length<5){const part=entry[1];const title=part.match(/<title>([\s\S]*?)<\/title>/i)?.[1];const link=part.match(/<link>([\s\S]*?)<\/link>/i)?.[1];const description=part.match(/<description>([\s\S]*?)<\/description>/i)?.[1];const url=decodeXml(link);if(title&&safeHttpUrl(url))fallback.push({title:decodeXml(title),url,snippet:decodeXml(description).slice(0,600)});}
+  if(!fallback.length)throw new Error('No usable search results from DuckDuckGo or Bing; configure BRAVE_SEARCH_API_KEY for reliable search');
   return fallback;
 }
 
-async function exchangeRate(base, quote) {
+async function exchangeRate(base, quote, signal) {
   const from=String(base||"USD").toUpperCase().replace(/[^A-Z]/g,"").slice(0,3),to=String(quote||"UAH").toUpperCase().replace(/[^A-Z]/g,"").slice(0,3);
   if(from==="USD"&&to==="UAH"){
-    const response=await fetch("https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=USD&json");
+    const response=await fetch("https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=USD&json",{signal});
     if(response.ok){const item=(await response.json())?.[0];if(item?.rate)return {ok:true,base:from,quote:to,rate:Number(item.rate),date:item.exchangedate,source:"https://bank.gov.ua/ua/markets/exchangerates"};}
   }
-  const response=await fetch(`https://api.frankfurter.app/latest?from=${from}&to=${to}`);if(!response.ok)throw new Error(`exchange_${response.status}`);const data=await response.json();const rate=Number(data.rates?.[to]);if(!rate)throw new Error("exchange_rate_missing");return {ok:true,base:from,quote:to,rate,date:data.date,source:"https://frankfurter.app/"};
+  const response=await fetch(`https://api.frankfurter.app/latest?from=${from}&to=${to}`,{signal});if(!response.ok)throw new Error(`exchange_${response.status}`);const data=await response.json();const rate=Number(data.rates?.[to]);if(!rate)throw new Error("exchange_rate_missing");return {ok:true,base:from,quote:to,rate,date:data.date,source:"https://frankfurter.app/"};
 }
 
-async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, requestedModel) {
+async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, requestedModel, signal) {
   const selected=validateModel(requestedModel,env);
   const agnes=selected.startsWith("agnes-"),cohere=selected==="north-mini-code-1-0",zen=ZEN_MODELS.has(selected),responses=ZEN_RESPONSES_MODELS.has(selected);
   const model=agnes?(env.NVIDIA_MODEL||"nvidia/nemotron-3-super-120b-a12b"):selected;
@@ -188,6 +198,7 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
     try {
       response = await fetch(endpoint, {
         method: "POST",
+        signal,
         headers: {
           "authorization": `Bearer ${apiKey}`,
           "content-type": "application/json",
@@ -206,6 +217,7 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
       const backoff = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 700 * (2 ** attempt) + Math.floor(Math.random() * 350);
       await sleep(Math.min(backoff, 9000));
     } catch (error) {
+      if(signal?.aborted)throw error;
       lastText = String(error?.message || error);
       if (attempt === 4) break;
       await sleep(700 * (2 ** attempt));
@@ -214,7 +226,7 @@ async function nvidia(env, messages, maxTokens = 2048, temperature = 0.45, reque
   throw new Error(`${zen?"OpenCode Zen":cohere?"Cohere":"NVIDIA"} ${lastStatus || "network"}: ${lastText.slice(0, 300)}`);
 }
 
-async function nvidiaStream(env, messages, requestedModel, requestedEffort, tools = []) {
+async function nvidiaStream(env, messages, requestedModel, requestedEffort, tools = [], signal) {
   const model = validateModel(requestedModel,env);
   const agnes = model.startsWith("agnes-"),zen=ZEN_MODELS.has(model),responses=ZEN_RESPONSES_MODELS.has(model);
   const cohere = model === "north-mini-code-1-0";
@@ -228,9 +240,9 @@ async function nvidiaStream(env, messages, requestedModel, requestedEffort, tool
   for (let attempt = 0; attempt < 5; attempt++) {
     let response;
     try{response = await fetch(endpoint, {
-      method: "POST",headers: { "authorization": `Bearer ${apiKey}`, "content-type": "application/json", "accept": "text/event-stream" },
+      method: "POST",signal,headers: { "authorization": `Bearer ${apiKey}`, "content-type": "application/json", "accept": "text/event-stream" },
       body: JSON.stringify(responses?{model,input:responsesInput(messages),max_output_tokens:4096,stream:true,...(tools.length?{tools:tools.map(t=>({type:"function",name:t.function.name,description:t.function.description,parameters:t.function.parameters})),tool_choice:"auto"}:{})}:{ model, messages, temperature: 0.45, max_tokens: 4096, stream: true, ...(tools.length?{tools,tool_choice:"auto"}:{}), ...((agnes||cohere||zen)?{}:{reasoning_effort: reasoningEffort}) }),
-    });}catch(error){lastText=String(error?.message||error);if(attempt<4){await sleep(Math.min(700*(2**attempt),9000));continue}throw new Error(`${provider} network: ${lastText.slice(0,300)}`);}
+    });}catch(error){if(signal?.aborted)throw error;lastText=String(error?.message||error);if(attempt<4){await sleep(Math.min(700*(2**attempt),9000));continue}throw new Error(`${provider} network: ${lastText.slice(0,300)}`);}
     if (response.ok) return response;
     lastText = await response.text();
     if (![408,429,500,502,503,504].includes(response.status)) throw new Error(`${provider} ${response.status}: ${lastText.slice(0,300)}`);
@@ -288,21 +300,21 @@ const CHAT_TOOLS=[
   {type:"function",function:{name:"find_on_page",description:"Найти текст на HTTPS-странице и прочитать окружающий фрагмент.",parameters:{type:"object",properties:{url:{type:"string"},query:{type:"string"}},required:["url","query"]}}}
 ];
 
-async function executeChatTool(call,send){
+async function executeChatTool(call,send,signal,env){
   const name=String(call.function?.name||"");let args={};try{args=JSON.parse(call.function?.arguments||"{}")}catch{}
   if(name==="get_exchange_rate"){
     const base=String(args.base||"USD"),quote=String(args.quote||"UAH");send({type:"tool_call",id:call.id,name,label:`Проверяю курс ${base.toUpperCase()} к ${quote.toUpperCase()}`,icon:"search"});
-    try{const data=await exchangeRate(base,quote);const u=new URL(data.source);send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Курс ${data.base}/${data.quote} получен`,icon:"search"});return {result:JSON.stringify(data),sources:[{url:data.source,title:data.source.includes("bank.gov.ua")?"Национальный банк Украины — официальный курс":"Frankfurter — exchange rates",domain:u.hostname.replace(/^www\./,""),snippet:`${data.date}: 1 ${data.base} = ${data.rate} ${data.quote}`,favicon:`${u.origin}/favicon.ico`}]};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Курс не получен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
+    try{const data=await exchangeRate(base,quote,signal);const u=new URL(data.source);send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Курс ${data.base}/${data.quote} получен`,icon:"search"});return {result:JSON.stringify(data),sources:[{url:data.source,title:data.source.includes("bank.gov.ua")?"Национальный банк Украины — официальный курс":"Frankfurter — exchange rates",domain:u.hostname.replace(/^www\./,""),snippet:`${data.date}: 1 ${data.base} = ${data.rate} ${data.quote}`,favicon:`${u.origin}/favicon.ico`}]};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Курс не получен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
   }
   if(name==="web_search"){
     const query=String(args.query||"").trim().slice(0,300);send({type:"tool_call",id:call.id,name,label:`Поиск «${query}»`,icon:"search"});
-    try{const results=await webSearch(query);const sources=results.map(r=>{const u=new URL(r.url);return {url:r.url,title:r.title||u.hostname,domain:u.hostname.replace(/^www\./,""),snippet:r.snippet,favicon:`${u.origin}/favicon.ico`}});send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Найдено результатов: ${results.length}`,icon:"search"});return {result:JSON.stringify({ok:true,query,results}),sources};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Поиск не выполнен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
+    try{const results=await webSearch(query,signal,env);const sources=results.map(r=>{const u=new URL(r.url);return {url:r.url,title:r.title||u.hostname,domain:u.hostname.replace(/^www\./,""),snippet:r.snippet,favicon:`${u.origin}/favicon.ico`}});send({type:"tool_result",id:call.id,name,status:"tool_success",text:`Найдено результатов: ${results.length}`,icon:"search"});return {result:JSON.stringify({ok:true,query,results}),sources};}catch(error){const result={ok:false,error:String(error?.message||error)};send({type:"tool_result",id:call.id,name,status:"recoverable_error",text:`Поиск не выполнен: ${result.error}`,icon:"error"});return {result:JSON.stringify(result),sources:[]};}
   }
   if(name==="open_url"||name==="read_page"||name==="find_on_page"){
     const url=safeHttpUrl(String(args.url||""));send({type:"tool_call",id:call.id,name,label:`Читаю страницу: ${url?.hostname||"некорректный URL"}`,icon:"web"});
     try{
       if(!url)throw new Error("invalid_https_url");
-      const response=await fetch(url.href,{redirect:"follow",headers:{"accept":"text/html,text/plain,application/json","user-agent":"Mozilla/5.0 WorkAI/0.2"},signal:AbortSignal.timeout(15000)});
+      const response=await fetch(url.href,{redirect:"follow",headers:{"accept":"text/html,text/plain,application/json","user-agent":"Mozilla/5.0 WorkAI/0.2"},signal:AbortSignal.any([AbortSignal.timeout(15000),signal].filter(Boolean))});
       if(!response.ok)throw new Error(`page_http_${response.status}`);
       if(!safeHttpUrl(response.url))throw new Error("unsafe_redirect");
       const contentType=response.headers.get("content-type")||"";
@@ -321,8 +333,9 @@ async function executeChatTool(call,send){
 
 function executionStream(env, body, model, messages, custom) {
   const encoder=new TextEncoder();
+  const abort=new AbortController();let cancelled=false;
   return new ReadableStream({async start(controller){
-    const send=value=>controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`));
+    const send=value=>{if(!cancelled)controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`))};
     try{
       const now=new Intl.DateTimeFormat("ru-RU",{timeZone:"Europe/Kyiv",dateStyle:"full",timeStyle:"long"}).format(new Date());
       const creationInstruction=body.creation_request&&String(body.mode)==="chat"?" Пользователь просит создать или изменить файл. Кратко и естественно объясни, что для фактического выполнения нужно перейти во вкладку «Работа»; не утверждай, что файл уже создаётся. Под ответом приложение покажет кнопки «Перейти» и «Пропустить». Перефразируй это самостоятельно, не используй шаблонную канцелярскую фразу.":"";
@@ -330,19 +343,19 @@ function executionStream(env, body, model, messages, custom) {
       const history=[system,...messages],allSources=[],toolMemory=[];let finalText="",finished=false,emptyTurns=0;
       for(let turn=1;turn<=8&&!finished;turn++){
         send({type:"model_turn_start",turn});
-        const upstream=await nvidiaStream(env,history,model,String(body.reasoning_effort||""),CHAT_TOOLS);
+        const upstream=await nvidiaStream(env,history,model,String(body.reasoning_effort||""),CHAT_TOOLS,abort.signal);
         const generated=await relayProvider(upstream,send,turn,ZEN_RESPONSES_MODELS.has(model));
         const assistant={role:"assistant",content:generated.content||null};if(generated.toolCalls.length)assistant.tool_calls=generated.toolCalls;history.push(assistant);
-        if(!generated.toolCalls.length){finalText=generated.content.trim();if(!finalText){emptyTurns++;if(emptyTurns<2){history.push({role:"user",content:"Ты завершил ход без ответа. Продолжи: используй уже полученные tool results и сформируй содержательный финальный ответ пользователю. Не вызывай повторно тот же поиск без изменения запроса."});continue}const fallback=await nvidia(env,[...history,{role:"user",content:"Сформируй финальный ответ по истории и результатам инструментов. Если данных недостаточно, конкретно объясни это и предложи полезный следующий шаг."}],2048,0.35,model);finalText=fallback.trim();if(!finalText)throw new Error("selected_model_returned_empty_answer");}send({type:"text_delta",delta:finalText});finished=true;break;}
+        if(!generated.toolCalls.length){finalText=generated.content.trim();if(!finalText){emptyTurns++;if(emptyTurns<2){history.push({role:"user",content:"Ты завершил ход без ответа. Продолжи: используй уже полученные tool results и сформируй содержательный финальный ответ пользователю. Не вызывай повторно тот же поиск без изменения запроса."});continue}const fallback=await nvidia(env,[...history,{role:"user",content:"Сформируй финальный ответ по истории и результатам инструментов. Если данных недостаточно, конкретно объясни это и предложи полезный следующий шаг."}],2048,0.35,model,abort.signal);finalText=fallback.trim();if(!finalText)throw new Error("selected_model_returned_empty_answer");}send({type:"text_delta",delta:finalText});finished=true;break;}
         if(generated.content.trim())send({type:"intermediate",text:generated.content.trim(),turn});
-        for(const call of generated.toolCalls){const executed=await executeChatTool(call,send);history.push({role:"tool",tool_call_id:call.id,name:call.function.name,content:executed.result});toolMemory.push(`${call.function.name}: ${executed.result}`);allSources.push(...executed.sources);}
+        for(const call of generated.toolCalls){const executed=await executeChatTool(call,send,abort.signal,env);history.push({role:"tool",tool_call_id:call.id,name:call.function.name,content:executed.result});toolMemory.push(`${call.function.name}: ${executed.result}`);allSources.push(...executed.sources);}
       }
       if(!finished)throw new Error("agent_turn_limit_reached");
       const unique=[...new Map(allSources.map(s=>[s.url,s])).values()].slice(0,8);if(unique.length)send({type:"sources",items:unique});
       if(toolMemory.length)send({type:"context_snapshot",text:`${finalText}\n\nРезультаты инструментов этой сессии:\n${toolMemory.join("\n")}`});
-      send({type:"task_completed"});send({type:"done"});controller.close();
-    }catch(error){send({type:"error",message:String(error?.message||error)});controller.close()}
-  }});
+      if(!cancelled){send({type:"task_completed"});send({type:"done"});controller.close()}
+    }catch(error){if(!cancelled){send({type:"error",message:String(error?.message||error)});controller.close()}}
+  },cancel(){cancelled=true;abort.abort()}});
 }
 
 async function github(env, path, init = {}) {

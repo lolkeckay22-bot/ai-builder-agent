@@ -104,3 +104,47 @@ test('cancelling Work Mode requests GitHub workflow cancellation',async()=>{
     assert.equal(cancelled,true);
   }finally{globalThis.fetch=previous;}
 });
+
+test('Work Mode plan originates from selected model and is written to event log',async()=>{
+  const previous=globalThis.fetch;const memoryByJob=new Map();let providerModel;
+  globalThis.fetch=async (url,init)=>{
+    if(String(url).includes('opencode.ai/zen')){
+      const body=JSON.parse(init.body);providerModel=body.model;
+      const task=body.messages[1].content.includes('theme')?'Inspect theme':'Inspect ZIP';
+      return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({tasks:[{title:task,phase:'inspect'},{title:'Verify archive',phase:'verify'}],skills:['archive-editor']})}}]}),{status:200});
+    }
+    if(String(url).endsWith('/dispatches'))return new Response(null,{status:204});
+    throw Error(`Unexpected URL ${url}`);
+  };
+  try{
+    const {JobEvents}=await import('../src/index.js');
+    const config={...env,WORKAI_GITHUB_TOKEN:'github-test',GITHUB_OWNER:'owner',GITHUB_REPO:'repo',JOB_EVENTS:{idFromName:id=>id,get:id=>{
+      if(!memoryByJob.has(id)){
+        const memory=new Map();memoryByJob.set(id,new JobEvents({storage:{get:async key=>memory.get(key),put:async(key,value)=>memory.set(key,value)}}));
+      }
+      return memoryByJob.get(id);
+    }}};
+    const response=await worker.fetch(request({model:'nemotron-3-ultra-free',prompt:'edit theme',kind:'mtz'},'/v1/jobs'),config);
+    const result=await response.json();
+    assert.equal(response.status,202);
+    assert.equal(providerModel,'nemotron-3-ultra-free');
+    assert.equal(result.tasks[0].title,'Inspect theme');
+    const eventResponse=await memoryByJob.get(result.id).fetch(new Request('https://events.internal'));
+    assert.equal((await eventResponse.json()).events[0].type,'todo.created');
+  }finally{globalThis.fetch=previous;}
+});
+
+test('cancelling a chat stream aborts the provider request',async()=>{
+  const previous=globalThis.fetch;let aborted=false;let started;
+  const providerStarted=new Promise(resolve=>{started=resolve});
+  globalThis.fetch=async (_url,options)=>new Promise((_,reject)=>{
+    options.signal.addEventListener('abort',()=>{aborted=true;reject(new DOMException('Cancelled','AbortError'))});
+    started();
+  });
+  try{
+    const response=await worker.fetch(request({model:'nemotron-3-ultra-free',messages:[{role:'user',content:'test'}]},'/v1/chat/stream'),env);
+    await providerStarted;
+    await response.body.cancel();
+    assert.equal(aborted,true);
+  }finally{globalThis.fetch=previous;}
+});
